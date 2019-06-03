@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# Author: Bin Wu <binwu@google.com>
+
+PWD=`pwd`
+JAVA=`which java`
+#VER=$(<ver)
+IPADDR=$(hostname -I | cut -d ' ' -f 1)
+
+__usage() {
+    echo "Usage: run {lc|df|clean}"
+}
+
+__local() {
+    [ -d ./output ] || mkdir -p ./output
+
+    mvn compile exec:java \
+        -Dexec.mainClass=bindiego.WordCount \
+        -Dexec.args="--output=./output/"
+}
+
+__dataflow() {
+    mvn -Pdataflow-runner compile exec:java \
+        -Dexec.mainClass=bindiego.WordCount \
+        -Dexec.args="--project=google.com:bin-wus-learning-center \
+        --streaming=false \
+        --tempLocation=gs://bindiego/tmp/ \
+        --gcpTempLocation=gs://bindiego/tmp/gcp/ \
+        --stagingLocation=gs://bindiego/staging/ \
+        --runner=DataflowRunner \
+        --output=gs://bindiego/output \
+        --region=asia-east1"
+}
+
+__clean() {
+    mvn clean; rm -rf ./output
+}
+
+__main() {
+    if [ $# -eq 0 ]
+    then
+        __usage
+    else
+        case $1 in
+            lc)
+                __local
+                ;;
+            df)
+                __dataflow
+                ;;
+            clean)
+                __clean
+                ;;
+            *)
+                __usage
+                ;;
+        esac
+    fi
+}
+
+__main $@
+
+exit 0
