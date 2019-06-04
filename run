@@ -12,8 +12,6 @@ __usage() {
 }
 
 __local() {
-    [ -d ./output ] || mkdir -p ./output
-
     mvn compile exec:java \
         -Dexec.mainClass=bindiego.WordCount \
         -Dexec.args="--output=./output/"
@@ -28,12 +26,12 @@ __dataflow() {
         --gcpTempLocation=gs://bindiego/tmp/gcp/ \
         --stagingLocation=gs://bindiego/staging/ \
         --runner=DataflowRunner \
-        --output=gs://bindiego/output \
+        --output=gs://bindiego/output/ \
         --region=asia-east1"
 }
 
 __clean() {
-    mvn clean; rm -rf ./output
+    mvn clean; rm -f output-*
 }
 
 __main() {
