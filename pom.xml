@@ -29,7 +29,7 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-    <beam.version>2.12.0</beam.version>
+    <beam.version>2.13.0</beam.version>
 
     <bigquery.version>v2-rev20181104-1.27.0</bigquery.version>
     <google-clients.version>1.27.0</google-clients.version>
@@ -49,6 +49,7 @@
     <hadoop.version>2.7.3</hadoop.version>
     <maven-surefire-plugin.version>2.21.0</maven-surefire-plugin.version>
     <nemo.version>0.1</nemo.version>
+    <geoip2.version>2.12.0</geoip2.version>
   </properties>
 
   <repositories>
@@ -377,6 +378,11 @@
       <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
       <version>${beam.version}</version>
     </dependency>
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-extensions-google-cloud-platform-core</artifactId>
+      <version>${beam.version}</version>
+    </dependency>
 
     <!-- Dependencies below this line are specific dependencies needed by the examples code. -->
     <dependency>
@@ -495,6 +501,13 @@
       <artifactId>mockito-core</artifactId>
       <version>${mockito.version}</version>
       <scope>test</scope>
+    </dependency>
+
+    <!-- GeoIP2 API -->
+    <dependency>
+      <groupId>com.maxmind.geoip2</groupId>
+      <artifactId>geoip2</artifactId>
+      <version>${geoip2.version}</version>
     </dependency>
   </dependencies>
 </project>

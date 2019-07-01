@@ -34,6 +34,19 @@ __clean() {
     mvn clean; rm -f output-*
 }
 
+__geo_db() {
+    [ -d geodb ] || mkdir -p $PWD/geodb
+
+    curl https://geolite.maxmind.com/download/geoip/database/GeoLite2-City.tar.gz \
+        > $PWD/geodb/GeoLite2-City.tar.gz
+    curl https://geolite.maxmind.com/download/geoip/database/GeoLite2-Country.tar.gz \
+        > $PWD/geodb/GeoLite2-Country.tar.gz 
+
+    cd $PWD/geodb
+
+    tar xzf GeoLite2-City.tar.gz; tar xzf GeoLite2-Country.tar.gz
+}
+
 __main() {
     if [ $# -eq 0 ]
     then
@@ -48,6 +61,9 @@ __main() {
                 ;;
             clean)
                 __clean
+                ;;
+            geodb)
+                __geo_db
                 ;;
             *)
                 __usage

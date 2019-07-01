@@ -36,6 +36,11 @@ import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 
+import org.apache.beam.sdk.io.FileSystems;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.Channels;
+import com.maxmind.geoip2.DatabaseReader;
+
 /**
  * An example that counts words in Shakespeare and includes Beam best practices.
  *
@@ -194,6 +199,15 @@ public class WordCount {
   public static void main(String... args) {
     WordCountOptions options =
         PipelineOptionsFactory.fromArgs(args).withValidation().as(WordCountOptions.class);
+
+    try {
+        ReadableByteChannel chan = FileSystems.open(FileSystems.matchNewResource(
+            "gs://bindiego/geodb/GeoLite2-City.mmdb", false /* is_directory */));
+
+        DatabaseReader dbreader = new DatabaseReader.Builder(
+            Channels.newInputStream(chan)).build();
+    } catch (Exception ex) {
+    }
 
     runWordCount(options);
   }
