@@ -13,20 +13,30 @@ __usage() {
 
 __local() {
     mvn compile exec:java \
-        -Dexec.mainClass=bindiego.WordCount \
+        -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.args="--output=./output/"
 }
 
 __dataflow() {
     mvn -Pdataflow-runner compile exec:java \
-        -Dexec.mainClass=bindiego.WordCount \
+        -Dexec.mainClass=bindiego.BindiegoStreaming \
+        -Dexec.cleanupDaemonThreads=false \
         -Dexec.args="--project=google.com:bin-wus-learning-center \
-        --streaming=false \
+        --streaming=true \
+        --autoscalingAlgorithm=THROUGHPUT_BASED \
+        --maxNumWorkers=20 \
+        --workerMachineType=n1-standard-2 \
+        --diskSizeGb=64 \
+        --numWorkers=3 \
         --tempLocation=gs://bindiego/tmp/ \
         --gcpTempLocation=gs://bindiego/tmp/gcp/ \
         --stagingLocation=gs://bindiego/staging/ \
         --runner=DataflowRunner \
-        --output=gs://bindiego/output/ \
+        --topic=projects/google.com:bin-wus-learning-center/topics/dingoactions \
+        --subscription=projects/google.com:bin-wus-learning-center/subscriptions/dingoactions2avro \
+        --numShards=1 \
+        --windowSize=5s \
+        --outputDir=gs://bindiego/output/tmp/ \
         --region=asia-east1"
 }
 
