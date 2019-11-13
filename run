@@ -36,7 +36,9 @@ __dataflow() {
         --subscription=projects/google.com:bin-wus-learning-center/subscriptions/dingoactions2avro \
         --numShards=1 \
         --windowSize=5s \
-        --outputDir=gs://bindiego/output/tmp/ \
+        --filenamePrefix=raycom. \
+        --outputDir=gs://bindiego/output/raycom/ \
+        --errOutputDir=gs://bindiego/output/raycom/err/ \
         --region=asia-east1"
 }
 
