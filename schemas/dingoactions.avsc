@@ -1,0 +1,21 @@
+{
+  "type": "record",
+  "name": "Dingoactions",
+  "fields": [{
+    "name": "ts",
+    "type": "long"
+    "logicalType": "timestamp-millis"
+  }, 
+  {
+    "name": "thread_id",
+    "type": "string"
+  }, 
+  {
+    "name": "thread_name",
+    "type": "string"
+  }, 
+  {
+    "name": "seq",
+    "type": "int"
+  }]
+}

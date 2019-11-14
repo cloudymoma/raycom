@@ -37,8 +37,8 @@ __dataflow() {
         --numShards=1 \
         --windowSize=5s \
         --filenamePrefix=raycom. \
-        --outputDir=gs://bindiego/output/raycom/ \
-        --errOutputDir=gs://bindiego/output/raycom/err/ \
+        --outputDir=gs://bindiego/output/out/ \
+        --errOutputDir=gs://bindiego/output/out/err/ \
         --region=asia-east1"
 }
 

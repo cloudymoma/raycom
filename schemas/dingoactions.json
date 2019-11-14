@@ -1,0 +1,22 @@
+{ "BigQuery Schema": [
+  {
+    "mode": "NULLABLE",
+    "name": "ts",
+    "type": "TIMESTAMP"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "thread_id",
+    "type": "STRING"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "thread_name",
+    "type": "STRING"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "seq",
+    "type": "INTEGER"
+  }
+]}

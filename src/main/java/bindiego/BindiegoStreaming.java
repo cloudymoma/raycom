@@ -80,11 +80,12 @@ public class BindiegoStreaming {
             .apply(options.getWindowSize() + " window for healthy data",
                 Window.into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
 
+        // REVISIT: we may apply differnet window for error data?
         PCollection<String> errData = processedData.get(STR_FAILURE_OUT)
             .apply(options.getWindowSize() + " window for error data",
                 Window.into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
 
-        healthData.apply("Write windowd healthy CSV files", 
+        healthData.apply("Write windowed healthy CSV files", 
             TextIO.write()
                 .withNumShards(options.getNumShards())
                 .withWindowedWrites()
@@ -98,7 +99,7 @@ public class BindiegoStreaming {
                 .withTempDirectory(
                     FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())));
 
-        errData.apply("Write windowd error data in CSV format", 
+        errData.apply("Write windowed error data in CSV format", 
             TextIO.write()
                 .withNumShards(options.getNumShards())
                 .withWindowedWrites()
@@ -116,7 +117,8 @@ public class BindiegoStreaming {
         //p.run().waitUntilFinish();
     }
 
-    public static interface BindiegoStreamingOptions extends PipelineOptions, StreamingOptions {
+    public static interface BindiegoStreamingOptions 
+            extends PipelineOptions, StreamingOptions {
         @Description("Topic of pubsub")
         @Default.String("projects/google.com:bin-wus-learning-center/topics/dingoactions")
         ValueProvider<String> getTopic();
