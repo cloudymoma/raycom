@@ -30,6 +30,7 @@ __dataflow() {
         --numWorkers=3 \
         --tempLocation=gs://bindiego/tmp/ \
         --gcpTempLocation=gs://bindiego/tmp/gcp/ \
+        --gcsTempLocation=gs://bindiego/tmp/gcs/ \
         --stagingLocation=gs://bindiego/staging/ \
         --runner=DataflowRunner \
         --topic=projects/google.com:bin-wus-learning-center/topics/dingoactions \
@@ -37,8 +38,10 @@ __dataflow() {
         --numShards=1 \
         --windowSize=5s \
         --filenamePrefix=raycom. \
-        --outputDir=gs://bindiego/output/out/ \
-        --errOutputDir=gs://bindiego/output/out/err/ \
+        --outputDir=gs://bindiego/raycom/out/ \
+        --errOutputDir=gs://bindiego/raycom/out/err/ \
+        --bqSchema=gs://bindiego/raycom/schemas/dingoactions.json \
+        --bqOutputTable=google.com:bin-wus-learning-center:raycom.dingoactions \
         --region=asia-east1"
 }
 
