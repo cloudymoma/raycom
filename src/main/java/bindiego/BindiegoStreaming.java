@@ -18,6 +18,7 @@ import org.apache.beam.sdk.io.AvroIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.CreateDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.WriteDisposition;
+import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.FileBasedSink;
@@ -194,6 +195,8 @@ public class BindiegoStreaming {
                         .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
                         .withWriteDisposition(WriteDisposition.WRITE_APPEND)
                         .to(options.getBqOutputTable())
+                        .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                        .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
                         .withCustomGcsTempLocation(options.getGcsTempLocation()));
 
         errData.apply("Write windowed error data in CSV format", 
