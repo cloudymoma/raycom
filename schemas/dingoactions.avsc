@@ -1,6 +1,6 @@
 {
   "type": "record",
-  "name": "Dingoactions",
+  "name": "dingoactions",
   "fields": [{
     "name": "ts",
     "type": "long"
