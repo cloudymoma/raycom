@@ -9,4 +9,4 @@ You can use this master branch as a skeleton java project
 pubsub -> dataflow -> GCS(avro, csv for both data & deadleter) + BigQuery + BigTable
 
 #### Current pipeline DAG
-![](https://raw.githubusercontent.com/bindiego/raycom/streaming/pipeline_dag.png)
+![](https://raw.githubusercontent.com/bindiego/raycom/streaming/miscs/pipeline_dag.png)
