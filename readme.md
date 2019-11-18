@@ -27,8 +27,10 @@ If you use the [GCP Play Ground](https://github.com/bindiego/gcpplayground) to p
 ```
 
 #### FAQ
-Do I need to setup the BigQuery table in advance?
+1. Do I need to setup the BigQuery table in advance?
+
 A: No. The application will create for you, and append to existing table by default.
 
-How to control the permissions?
+2. How to control the permissions?
+
 A: This project is currently relying on the service account specified by the `GOOGLE_APPLICATION_CREDENTIALS` environment variable. Consult [here](https://cloud.google.com/docs/authentication/getting-started) for details.
