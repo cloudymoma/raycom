@@ -23,7 +23,7 @@ This branch is focusing on streaming, so the sample subscribes messages from Pub
 If you use the [GCP Play Ground](https://github.com/bindiego/gcpplayground) to produce the pubsub message, there isn't much to do. Simply update the `run` shell script, make sure you have the corresponding permissions to manipulate the GCP resources. Then
 
 ```
-./run
+./run df
 ```
 
 #### FAQ
