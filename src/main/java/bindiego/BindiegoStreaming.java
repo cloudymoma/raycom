@@ -22,6 +22,8 @@ import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.FileBasedSink;
+import org.apache.beam.sdk.io.FileSystems;
+import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -48,6 +50,11 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.sdk.coders.AvroCoder;
+import org.apache.avro.Schema;
+import org.apache.avro.file.CodecFactory;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.joda.time.Duration;
@@ -79,7 +86,63 @@ public class BindiegoStreaming {
         }
     }
 
-    static void run(BindiegoStreamingOptions options) {
+    /* Convert Csv to Avro */
+    public static class ConvertCsvToAvro extends DoFn<String, GenericRecord> {
+        public ConvertCsvToAvro(String schemaJson, String delimiter) {
+            this.schemaJson = schemaJson;
+            this.delimiter = delimiter;
+        }
+
+        @ProcessElement
+        public void processElement(ProcessContext ctx) throws IllegalArgumentException {
+            String[] csvData = ctx.element().split(delimiter);
+           
+            Schema schema = new Schema.Parser().parse(schemaJson);
+
+            // Create Avro Generic Record
+            GenericRecord genericRecord = new GenericData.Record(schema);
+            List<Schema.Field> fields = schema.getFields();
+
+            for (int index = 0; index < fields.size(); ++index) {
+                Schema.Field field = fields.get(index);
+                String fieldType = field.schema().getType().getName().toLowerCase();
+
+                // REVISIT: suprise, java can switch string :)
+                switch (fieldType) {
+                    case "string":
+                        genericRecord.put(field.name(), csvData[index]);
+                        break;
+                    case "boolean":
+                        genericRecord.put(field.name(), Boolean.valueOf(csvData[index]));
+                        break;
+                    case "int":
+                        genericRecord.put(field.name(), Integer.valueOf(csvData[index]));
+                        break;
+                    case "long":
+                        genericRecord.put(field.name(), Long.valueOf(csvData[index]));
+                        break;
+                    case "float":
+                        genericRecord.put(field.name(), Float.valueOf(csvData[index]));
+                        break;
+                    case "double":
+                        genericRecord.put(field.name(), Double.valueOf(csvData[index]));
+                        break;
+                    default:
+                        throw new IllegalArgumentException("Field type " 
+                            + fieldType + " is not supported.");
+                }
+            }
+
+            ctx.output(genericRecord);
+        }
+
+        private String schemaJson;
+        private String delimiter;
+    }
+
+    static void run(BindiegoStreamingOptions options) throws Exception {
+        // FileSystems.setDefaultPipelineOptions(options);
+
         Pipeline p = Pipeline.create(options);
 
         PCollection<PubsubMessage> messages = p.apply("Read Pubsub Events", 
@@ -124,6 +187,8 @@ public class BindiegoStreaming {
                         String headers = "ts,thread_id,thread_name,seq";
                         String[] cols = headers.split(",");
 
+                        // REFISIT: options is NOT serializable, make a class for this transform
+                        // String[] csvData = dataStr.split(options.getCsvDelimiter()); 
                         String[] csvData = dataStr.split(","); 
 
                         TableRow row = new TableRow();
@@ -199,6 +264,37 @@ public class BindiegoStreaming {
                         .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
                         .withCustomGcsTempLocation(options.getGcsTempLocation()));
 
+        // Assume dealing with CSV payload, so basically convert CSV to Avro
+        SchemaParser schemaParser = new SchemaParser();
+        String avroSchemaJson = schemaParser.getAvroSchema(options.getAvroSchema().get());
+        Schema avroSchema = new Schema.Parser().parse(avroSchemaJson);
+
+        healthData.apply("Prepare Avro data",
+                ParDo.of(new ConvertCsvToAvro(avroSchemaJson, options.getCsvDelimiter())))
+            .setCoder(AvroCoder.of(GenericRecord.class, avroSchema))
+            // .apply("Write Avro formatted data", AvroIO.writeGenericRecords(avroSchemaJson)
+            .apply("Write Avro formatted data", AvroIO.writeGenericRecords(avroSchema)
+                .to(
+                    new WindowedFilenamePolicy(
+                        options.getOutputDir(),
+                        options.getFilenamePrefix(),
+                        options.getOutputShardTemplate(),
+                        options.getAvroFilenameSuffix()
+                    ))
+                .withWindowedWrites()
+                .withNumShards(options.getNumShards())
+                .withTempDirectory(
+                    FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())
+                )
+                .withCodec(CodecFactory.snappyCodec()));
+        /*
+                .withTempDirectory(NestedValueProvider.of(
+                    options.getGcsTempLocation(),
+                    (SerializableFunction<String, ResourceId>) input ->
+                        FileBasedSink.convertToFileResourceIfPossible(input)
+                ))
+        */
+
         errData.apply("Write windowed error data in CSV format", 
             TextIO.write()
                 .withNumShards(options.getNumShards())
@@ -268,17 +364,30 @@ public class BindiegoStreaming {
         String getWindowSize();
         void setWindowSize(String value);
 
-         @Description("JSON file with BigQuery Schema description")
-         ValueProvider<String> getBqSchema();
-         void setBqSchema(ValueProvider<String> value);
+        @Description("CSV file delimiter.")
+        @Default.String(",")
+        String getCsvDelimiter();
+        void setCsvDelimiter(String value);
 
-         @Description("BigQuery output table to write to")
-         ValueProvider<String> getBqOutputTable();
-         void setBqOutputTable(ValueProvider<String> value);
+        @Description("JSON file with BigQuery Schema description")
+        @Required
+        ValueProvider<String> getBqSchema();
+        void setBqSchema(ValueProvider<String> value);
 
-         @Description("GCS temp location for BigQuery")
-         ValueProvider<String> getGcsTempLocation();
-         void setGcsTempLocation(ValueProvider<String> value);
+        @Description("BigQuery output table to write to")
+        @Required
+        ValueProvider<String> getBqOutputTable();
+        void setBqOutputTable(ValueProvider<String> value);
+
+        @Description("GCS temp location for BigQuery")
+        @Required
+        ValueProvider<String> getGcsTempLocation();
+        void setGcsTempLocation(ValueProvider<String> value);
+
+        @Description("Avro schema file")
+        @Required
+        ValueProvider<String> getAvroSchema();
+        void setAvroSchema(ValueProvider<String> value);
     }
 
     public static void main(String... args) {
@@ -286,7 +395,12 @@ public class BindiegoStreaming {
             .fromArgs(args).withValidation().as(BindiegoStreamingOptions.class);
         options.setStreaming(true);
 
-        run(options);
+        try {
+            run(options);
+        } catch (Exception ex) {
+            System.err.println(ex);
+            ex.printStackTrace();
+        }
     }
 
     /* tag for main output when extracting pubsub message payload*/

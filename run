@@ -42,6 +42,7 @@ __dataflow() {
         --errOutputDir=gs://bindiego/raycom/out/err/ \
         --bqSchema=gs://bindiego/raycom/schemas/dingoactions.json \
         --bqOutputTable=google.com:bin-wus-learning-center:raycom.dingoactions \
+        --avroSchema=gs://bindiego/raycom/schemas/dingoactions.avsc \
         --region=asia-east1"
 }
 
