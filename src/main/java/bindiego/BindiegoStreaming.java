@@ -4,6 +4,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+// Import SLF4J packages.
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableSchema;
 import com.google.api.services.bigquery.model.TableReference;
@@ -40,11 +44,18 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.DoFn.MultiOutputReceiver;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
-import org.apache.beam.sdk.transforms.DoFn.MultiOutputReceiver;
-import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.windowing.AfterEach;
+import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
+import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
+import org.apache.beam.sdk.transforms.windowing.AfterPane;
+import org.apache.beam.sdk.transforms.windowing.Window.ClosingBehavior;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -58,6 +69,7 @@ import org.apache.avro.generic.GenericRecord;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 
 import bindiego.io.WindowedFilenamePolicy;
 import bindiego.utils.DurationUtils;
@@ -72,16 +84,19 @@ public class BindiegoStreaming {
 
             String str = null;
 
-            // TODO: data validation here to prevent later various outputs inconsistent
+            // TODO: data validation here to prevent later various outputs inconsistency
             try {
                 PubsubMessage psmsg = ctx.element();
                 str = new String(psmsg.getPayload(), StandardCharsets.UTF_8);
+                logger.debug("Extracted raw message: " + str);
 
                 r.get(STR_OUT).output(str);
             } catch (Exception ex) {
                 if (null == str)
                     str = "AUTO_MSG failed to extract message";
                 r.get(STR_FAILURE_OUT).output(str);
+
+                logger.error("Failed extract pubsub message", ex);
             }
         }
     }
@@ -147,20 +162,65 @@ public class BindiegoStreaming {
 
         PCollection<PubsubMessage> messages = p.apply("Read Pubsub Events", 
             PubsubIO.readMessagesWithAttributesAndMessageId()
+                .withIdAttribute(options.getMessageIdAttr())
+                .withTimestampAttribute(options.getMessageTsAttr())
                 .fromSubscription(options.getSubscription()));
 
         PCollectionTuple processedData = messages.apply("Extract CSV payload from pubsub message",
             ParDo.of(new ExtractPayload())
                 .withOutputTags(STR_OUT, TupleTagList.of(STR_FAILURE_OUT)));
 
+        /* A simple approach 
         PCollection<String> healthData = processedData.get(STR_OUT)
             .apply(options.getWindowSize() + " window for healthy data",
-                Window.into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
+                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                    .triggering(
+                        // Repeatedly.forever(AfterWatermark.pastEndOfWindow()
+                        AfterWatermark.pastEndOfWindow()
+                            .withEarlyFirings(AfterProcessingTime.pastFirstElementInPane() 
+                                .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                            .withLateFirings(AfterPane.elementCountAtLeast(
+                                options.getLateFiringCount().intValue()))
+                        // )
+                    )
+                    .discardingFiredPanes() // e.g. .accumulatingAndRetractingFiredPanes() etc.
+                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                        ClosingBehavior.FIRE_IF_NON_EMPTY));
+        */
+
+        /* 
+         * @desc Use a composite trigger
+         * - triggering every early firing period of processing time
+         * - util watermark passes
+         * - then triggering any time a late datum arrives
+         * - up to a garbage collection horizon of allowed lateness of event time
+         * - all with accumulation strategy turned on that specified in code
+         */
+        PCollection<String> healthData = processedData.get(STR_OUT)
+            .apply(options.getWindowSize() + " window for healthy data",
+                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                    .triggering(
+                        AfterEach.inOrder(
+                            Repeatedly.forever( 
+                                AfterProcessingTime.pastFirstElementInPane() 
+                                    .alignedTo(DurationUtils.parseDuration(
+                                        options.getEarlyFiringPeriod())))
+                                .orFinally(AfterWatermark.pastEndOfWindow()),
+                            Repeatedly.forever(
+                                AfterPane.elementCountAtLeast(
+                                    options.getLateFiringCount().intValue()))
+                        )
+                        //.orFinally(AfterWatermark.pastEndOfWindow()
+                        //    .plusDelayOf(DurationUtils.parseDuration(options.getAllowedLateness())))
+                    )
+                    .discardingFiredPanes()
+                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                        ClosingBehavior.FIRE_IF_NON_EMPTY));
 
         // REVISIT: we may apply differnet window for error data?
         PCollection<String> errData = processedData.get(STR_FAILURE_OUT)
             .apply(options.getWindowSize() + " window for error data",
-                Window.into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
+                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
 
         healthData.apply("Write windowed healthy CSV files", 
             TextIO.write()
@@ -359,10 +419,25 @@ public class BindiegoStreaming {
         Integer getNumShards();
         void setNumShards(Integer value);
 
-        @Description("Output file's window size.")
+        @Description("Output window size.")
         @Default.String("5m")
         String getWindowSize();
         void setWindowSize(String value);
+
+        @Description("Allowed late data for a window")
+        @Default.String("5m")
+        String getAllowedLateness();
+        void setAllowedLateness(String value);
+
+        @Description("Early firing period")
+        @Default.String("1m")
+        String getEarlyFiringPeriod();
+        void setEarlyFiringPeriod(String value);
+
+        @Description("Late firing count")
+        @Default.String("1")
+        Integer getLateFiringCount();
+        void setLateFiringCount(Integer value);
 
         @Description("CSV file delimiter.")
         @Default.String(",")
@@ -388,6 +463,16 @@ public class BindiegoStreaming {
         @Required
         ValueProvider<String> getAvroSchema();
         void setAvroSchema(ValueProvider<String> value);
+
+        @Description("PubsubMessage ID attribute.")
+        @Default.String("id")
+        String getMessageIdAttr();
+        void setMessageIdAttr(String value);
+
+        @Description("PubsubMessage timestamp attribute.")
+        @Default.String("timestamp")
+        String getMessageTsAttr();
+        void setMessageTsAttr(String value);
     }
 
     public static void main(String... args) {
@@ -402,6 +487,9 @@ public class BindiegoStreaming {
             ex.printStackTrace();
         }
     }
+
+    // Instantiate Logger
+    private static final Logger logger = LoggerFactory.getLogger(BindiegoStreaming.class);
 
     /* tag for main output when extracting pubsub message payload*/
     private static final TupleTag<String> STR_OUT = 
