@@ -49,6 +49,7 @@ import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
+import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.AfterEach;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
@@ -56,6 +57,9 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.Window.ClosingBehavior;
+import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.ToString;
+import org.apache.beam.sdk.transforms.WithTimestamps;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -91,12 +95,32 @@ public class BindiegoStreaming {
                 logger.debug("Extracted raw message: " + str);
 
                 r.get(STR_OUT).output(str);
+
+                // use this only if the element doesn't have an event timestamp attached to it
+                // e.g. extract 'extractedTs' from psmsg.split(",")[0] from a CSV payload
+                // r.get(STR_OUT).outputWithTimestamp(str, extractedTs);
             } catch (Exception ex) {
                 if (null == str)
                     str = "AUTO_MSG failed to extract message";
                 r.get(STR_FAILURE_OUT).output(str);
 
                 logger.error("Failed extract pubsub message", ex);
+            }
+        }
+    }
+
+    /* add timestamp for PCollection<T> data
+     *
+     * this implementation suppose CSV and stampstamp as 1st column
+     */
+    private static class SetTimestamp implements SerializableFunction<String, Instant> {
+        @Override
+        public Instant apply(String input) {
+            String[] components = input.split(","); // assume CSV
+            try {
+                return new Instant(Long.parseLong(components[0].trim())); // assume 1st column is timestamp
+            } catch (ArrayIndexOutOfBoundsException | NumberFormatException e) {
+                return Instant.now();
             }
         }
     }
@@ -163,14 +187,17 @@ public class BindiegoStreaming {
         PCollection<PubsubMessage> messages = p.apply("Read Pubsub Events", 
             PubsubIO.readMessagesWithAttributesAndMessageId()
                 .withIdAttribute(options.getMessageIdAttr())
+                // set event time from a message attribute, milliseconds since the Unix epoch
                 .withTimestampAttribute(options.getMessageTsAttr())
                 .fromSubscription(options.getSubscription()));
 
         PCollectionTuple processedData = messages.apply("Extract CSV payload from pubsub message",
             ParDo.of(new ExtractPayload())
                 .withOutputTags(STR_OUT, TupleTagList.of(STR_FAILURE_OUT)));
+            // this usually used with TextIO 
+            // .apply("Set event timestamp value", WithTimestamps.of(new SetTimestamp())); 
 
-        /* A simple approach 
+        /* A terse approach */
         PCollection<String> healthData = processedData.get(STR_OUT)
             .apply(options.getWindowSize() + " window for healthy data",
                 Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
@@ -186,7 +213,6 @@ public class BindiegoStreaming {
                     .discardingFiredPanes() // e.g. .accumulatingAndRetractingFiredPanes() etc.
                     .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
                         ClosingBehavior.FIRE_IF_NON_EMPTY));
-        */
 
         /* 
          * @desc Use a composite trigger
@@ -196,6 +222,7 @@ public class BindiegoStreaming {
          * - up to a garbage collection horizon of allowed lateness of event time
          * - all with accumulation strategy turned on that specified in code
          */
+        /*
         PCollection<String> healthData = processedData.get(STR_OUT)
             .apply(options.getWindowSize() + " window for healthy data",
                 Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
@@ -216,6 +243,7 @@ public class BindiegoStreaming {
                     .discardingFiredPanes()
                     .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
                         ClosingBehavior.FIRE_IF_NON_EMPTY));
+        */
 
         // REVISIT: we may apply differnet window for error data?
         PCollection<String> errData = processedData.get(STR_FAILURE_OUT)

@@ -37,7 +37,7 @@ __dataflow() {
         --subscription=projects/google.com:bin-wus-learning-center/subscriptions/dingoactions2avro \
         --numShards=1 \
         --windowSize=6s \
-        --allowedLateness=10s \
+        --allowedLateness=8s \
         --earlyFiringPeriod=2s \
         --lateFiringCount=1 \
         --filenamePrefix=raycom. \
