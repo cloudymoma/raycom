@@ -46,6 +46,8 @@ __dataflow() {
         --bqSchema=gs://bindiego/raycom/schemas/dingoactions.json \
         --bqOutputTable=google.com:bin-wus-learning-center:raycom.dingoactions \
         --avroSchema=gs://bindiego/raycom/schemas/dingoactions.avsc \
+        --btInstanceId=bigbase \
+        --btTableId=streaming \
         --jobName=raycom-streaming \
         --region=asia-east1"
         # --update \

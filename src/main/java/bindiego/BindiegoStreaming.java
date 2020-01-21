@@ -402,7 +402,7 @@ public class BindiegoStreaming {
     }
 
     public static interface BindiegoStreamingOptions 
-            extends PipelineOptions, StreamingOptions {
+            extends PipelineOptions, StreamingOptions, CloudBigtableOptions  {
         @Description("Topic of pubsub")
         @Default.String("projects/google.com:bin-wus-learning-center/topics/dingoactions")
         ValueProvider<String> getTopic();
@@ -501,6 +501,16 @@ public class BindiegoStreaming {
         @Default.String("timestamp")
         String getMessageTsAttr();
         void setMessageTsAttr(String value);
+
+        @Description("Bigtable Instance Id")
+        @Required
+        String getBtInstanceId();
+        void setBtInstanceId(String value);
+
+        @Description("Bigtable Table Id to write realtime data to")
+        @Required
+        String getBtTableId();
+        void setBtTableId(String value);
     }
 
     public static void main(String... args) {
