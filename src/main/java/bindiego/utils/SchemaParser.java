@@ -16,7 +16,7 @@ import org.slf4j.LoggerFactory;
  * A helper object to parse a JSON on GCS. Usage is to provide A GCS URL and it will return
  * a JSONObject of the file
  */
-public class SchemaParser{
+public class SchemaParser {
 
   private static final Logger LOG = LoggerFactory.getLogger(SchemaParser.class);
 

@@ -18,6 +18,14 @@
       {
         "name": "seq",
         "type": "int"
+      },
+      {
+        "name": "dim1",
+        "type": "string"
+      },
+      {
+        "name": "metrics1",
+        "type": "int"
       }
   ]
 }

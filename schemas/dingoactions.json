@@ -18,5 +18,15 @@
     "mode": "NULLABLE",
     "name": "seq",
     "type": "INTEGER"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "dim1",
+    "type": "STRING"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "metrics1",
+    "type": "INTEGER"
   }
 ]}
