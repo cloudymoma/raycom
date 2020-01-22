@@ -274,7 +274,7 @@ public class BindiegoStreaming {
                         String dataStr = ctx.element();
 
                         // REVISIT: damn ugly here, hard coded table schema
-                        String headers = "ts,thread_id,thread_name,seq";
+                        String headers = "ts,thread_id,thread_name,seq,dim1,metrics1";
                         String[] cols = headers.split(",");
 
                         // REFISIT: options is NOT serializable, make a class for this transform
@@ -287,12 +287,16 @@ public class BindiegoStreaming {
                         int loopCtr = 
                             cols.length <= csvData.length ? cols.length : csvData.length;
                         for (int i = 0; i < loopCtr; ++i) {
+                            // deal with non-string field in BQ
                             switch (i) {
                                 case 0:
                                     row.set(cols[i], Long.parseLong(csvData[i])/1000);
                                     // row.set(cols[i], Integer.parseInt(csvData[i]));
                                     break;
                                 case 3:
+                                    row.set(cols[i], Integer.parseInt(csvData[i]));
+                                    break;
+                                case 5:
                                     row.set(cols[i], Integer.parseInt(csvData[i]));
                                     break;
                                 default:
