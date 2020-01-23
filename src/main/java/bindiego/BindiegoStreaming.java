@@ -274,7 +274,7 @@ public class BindiegoStreaming {
                         String dataStr = ctx.element();
 
                         // REVISIT: damn ugly here, hard coded table schema
-                        String headers = "ts,thread_id,thread_name,seq,dim1,metrics1";
+                        String headers = "event_ts,thread_id,thread_name,seq,dim1,metrics1";
                         String[] cols = headers.split(",");
 
                         // REFISIT: options is NOT serializable, make a class for this transform
@@ -286,6 +286,8 @@ public class BindiegoStreaming {
                         // for god sake safety purpose
                         int loopCtr = 
                             cols.length <= csvData.length ? cols.length : csvData.length;
+                        loopCtr++; // add process timestamp at the end of each row
+
                         for (int i = 0; i < loopCtr; ++i) {
                             // deal with non-string field in BQ
                             switch (i) {
@@ -298,6 +300,9 @@ public class BindiegoStreaming {
                                     break;
                                 case 5:
                                     row.set(cols[i], Integer.parseInt(csvData[i]));
+                                    break;
+                                case 6:
+                                    row.set("process_ts", System.currentTimeMillis()/1000);
                                     break;
                                 default:
                                     row.set(cols[i], csvData[i]);
@@ -347,7 +352,7 @@ public class BindiegoStreaming {
                                 }
                             }))
                         .withTimePartitioning(
-                            new TimePartitioning().setField("ts")
+                            new TimePartitioning().setField("event_ts")
                                 .setType("DAY")
                                 .setExpirationMs(null)
                         )

@@ -1,7 +1,7 @@
 { "BigQuery Schema": [
   {
     "mode": "NULLABLE",
-    "name": "ts",
+    "name": "event_ts",
     "type": "TIMESTAMP"
   },
   {
@@ -28,5 +28,10 @@
     "mode": "NULLABLE",
     "name": "metrics1",
     "type": "INTEGER"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "process_ts",
+    "type": "TIMESTAMP"
   }
 ]}
