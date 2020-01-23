@@ -93,7 +93,9 @@ public class BindiegoStreaming {
             // TODO: data validation here to prevent later various outputs inconsistency
             try {
                 PubsubMessage psmsg = ctx.element();
-                str = new String(psmsg.getPayload(), StandardCharsets.UTF_8);
+                str = new String(psmsg.getPayload(), StandardCharsets.UTF_8)
+                    + "," //hardcoded csv delimiter
+                    + Long.valueOf(System.currentTimeMillis()).toString();
                 logger.debug("Extracted raw message: " + str);
 
                 r.get(STR_OUT).output(str);
@@ -274,7 +276,7 @@ public class BindiegoStreaming {
                         String dataStr = ctx.element();
 
                         // REVISIT: damn ugly here, hard coded table schema
-                        String headers = "event_ts,thread_id,thread_name,seq,dim1,metrics1";
+                        String headers = "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts";
                         String[] cols = headers.split(",");
 
                         // REFISIT: options is NOT serializable, make a class for this transform
@@ -286,7 +288,6 @@ public class BindiegoStreaming {
                         // for god sake safety purpose
                         int loopCtr = 
                             cols.length <= csvData.length ? cols.length : csvData.length;
-                        loopCtr++; // add process timestamp at the end of each row
 
                         for (int i = 0; i < loopCtr; ++i) {
                             // deal with non-string field in BQ
@@ -302,7 +303,7 @@ public class BindiegoStreaming {
                                     row.set(cols[i], Integer.parseInt(csvData[i]));
                                     break;
                                 case 6:
-                                    row.set("process_ts", System.currentTimeMillis()/1000);
+                                    row.set(cols[i], Long.parseLong(csvData[i])/1000);
                                     break;
                                 default:
                                     row.set(cols[i], csvData[i]);
