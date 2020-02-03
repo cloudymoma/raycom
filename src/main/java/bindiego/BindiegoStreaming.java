@@ -93,9 +93,12 @@ public class BindiegoStreaming {
             // TODO: data validation here to prevent later various outputs inconsistency
             try {
                 PubsubMessage psmsg = ctx.element();
+                // CSV format
+                // raw:   "event_ts,thread_id,thread_name,seq,dim1,metrics1"
+                // after: "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts"
                 str = new String(psmsg.getPayload(), StandardCharsets.UTF_8)
-                    + "," //hardcoded csv delimiter
-                    + Long.valueOf(System.currentTimeMillis()).toString();
+                    + "," // hardcoded csv delimiter
+                    + Long.valueOf(System.currentTimeMillis()).toString(); // append process timestamp
                 logger.debug("Extracted raw message: " + str);
 
                 r.get(STR_OUT).output(str);
