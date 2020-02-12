@@ -1,5 +1,6 @@
 # Project specific
 output-*
+debug
 
 ##########################
 ## Java
