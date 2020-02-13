@@ -122,8 +122,12 @@ public class BindiegoStreaming {
                 // after: "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
                 str = new String(psmsg.getPayload(), StandardCharsets.UTF_8)
                     + "," // hardcoded csv delimiter
-                    + Long.valueOf(System.currentTimeMillis()).toString() // append process timestamp
-                    + dimTable.get(str.split(",")[4]); // dimemsion table lookup to complement dim value
+                    + Long.valueOf(System.currentTimeMillis()).toString(); // append process timestamp
+
+                // dimemsion table lookup to complement dim value
+                String dimVal = dimTable.get(str.split(",")[4]);
+                dimVal = dimVal == null ? "Not Found" : dimVal;
+
                 logger.debug("Extracted raw message: " + str);
 
                 r.get(STR_OUT).output(str);
