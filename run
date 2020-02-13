@@ -48,6 +48,11 @@ __dataflow() {
         --avroSchema=gs://bindiego/raycom/schemas/dingoactions.avsc \
         --btInstanceId=bigbase \
         --btTableId=streaming \
+        --jdbcClass=com.mysql.cj.jdbc.Driver \
+        --jdbcConn=jdbc:mysql://10.140.0.3:3306/gcp \
+        --jdbcUsername=gcp \
+        --jdbcPassword=gcp2020 \
+        --defaultWorkerLogLevel=INFO \
         --jobName=raycom-streaming \
         --region=asia-east1"
         # --update \

@@ -31,6 +31,10 @@
         "name": "process_ts",
         "type": "long",
         "logicalType": "timestamp-millis"
-      } 
+      }, 
+      {
+        "name": "dim1_val",
+        "type": "string"
+      }
   ]
 }

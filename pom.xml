@@ -31,7 +31,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-    <beam.version>2.18.0</beam.version>
+    <beam.version>2.19.0</beam.version>
 
     <bigquery.version>v2-rev20181104-1.27.0</bigquery.version>
     <bigtable.ver>1.11.0</bigtable.ver>
@@ -53,6 +53,7 @@
     <maven-surefire-plugin.version>2.21.0</maven-surefire-plugin.version>
     <nemo.version>0.1</nemo.version>
     <json.version>20160810</json.version>
+    <mysql.ver>8.0.19</mysql.ver>
   </properties>
 
   <repositories>
@@ -382,6 +383,13 @@
       <version>${beam.version}</version>
     </dependency>
 
+    <!-- JDBC connector -->
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-io-jdbc</artifactId>
+      <version>${beam.version}</version>
+    </dependency>
+
     <!-- Bigtable/HBase Beam connector -->
     <dependency>
         <groupId>com.google.cloud.bigtable</groupId>
@@ -501,6 +509,13 @@
       <scope>test</scope>
     </dependency>
     
+    <!-- Needed for some pre-built handy tools, e.g. DataflowWorkerLoggingOptions -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
+      <version>${beam.version}</version>
+    </dependency>
+    
     <dependency>
       <groupId>org.mockito</groupId>
       <artifactId>mockito-core</artifactId>
@@ -513,5 +528,11 @@
       <artifactId>json</artifactId>
       <version>${json.version}</version>
     </dependency>
+
+    <dependency>
+        <groupId>mysql</groupId>
+        <artifactId>mysql-connector-java</artifactId>
+        <version>${mysql.ver}</version>
+        </dependency>
   </dependencies>
 </project>

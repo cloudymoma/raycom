@@ -5,6 +5,9 @@ import  bindiego.BindiegoStreamingOptions;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.sql.*;
 
 // Import SLF4J packages.
 import org.slf4j.Logger;
@@ -30,6 +33,8 @@ import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.FileBasedSink;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.ResourceId;
+import org.apache.beam.sdk.io.jdbc.JdbcIO;
+import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -42,6 +47,11 @@ import org.apache.beam.sdk.options.Validation.Required;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.NestedValueProvider;
 import org.apache.beam.sdk.transforms.Count;
+import org.apache.beam.sdk.transforms.Sum;
+import org.apache.beam.sdk.transforms.Min;
+import org.apache.beam.sdk.transforms.Max;
+import org.apache.beam.sdk.transforms.Mean;
+import org.apache.beam.sdk.transforms.Latest;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -59,15 +69,22 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.Window.ClosingBehavior;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.ToString;
 import org.apache.beam.sdk.transforms.WithTimestamps;
+import org.apache.beam.sdk.transforms.GroupByKey;
+import org.apache.beam.sdk.transforms.Combine;
+import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.coders.AvroCoder;
+import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.avro.Schema;
 import org.apache.avro.file.CodecFactory;
 import org.apache.avro.generic.GenericData;
@@ -84,21 +101,29 @@ import bindiego.utils.SchemaParser;
 public class BindiegoStreaming {
     /* extract the csv payload from message */
     public static class ExtractPayload extends DoFn<PubsubMessage, String> {
+
+        public ExtractPayload(final PCollectionView<Map<String, String>> lookupTable) {
+            this.lookupTable = lookupTable;
+        }
+
         @ProcessElement
         public void processElement(ProcessContext ctx, MultiOutputReceiver r) 
                 throws IllegalArgumentException {
 
             String str = null;
 
+            Map<String, String> dimTable = ctx.sideInput(lookupTable);
+
             // TODO: data validation here to prevent later various outputs inconsistency
             try {
                 PubsubMessage psmsg = ctx.element();
                 // CSV format
                 // raw:   "event_ts,thread_id,thread_name,seq,dim1,metrics1"
-                // after: "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts"
+                // after: "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
                 str = new String(psmsg.getPayload(), StandardCharsets.UTF_8)
                     + "," // hardcoded csv delimiter
-                    + Long.valueOf(System.currentTimeMillis()).toString(); // append process timestamp
+                    + Long.valueOf(System.currentTimeMillis()).toString() // append process timestamp
+                    + dimTable.get(str.split(",")[4]); // dimemsion table lookup to complement dim value
                 logger.debug("Extracted raw message: " + str);
 
                 r.get(STR_OUT).output(str);
@@ -114,6 +139,8 @@ public class BindiegoStreaming {
                 logger.error("Failed extract pubsub message", ex);
             }
         }
+
+        private final PCollectionView<Map<String, String>> lookupTable;
     }
 
     /* add timestamp for PCollection<T> data
@@ -186,10 +213,141 @@ public class BindiegoStreaming {
         private String delimiter;
     }
 
+    // Read JDBC lookup table
+    // Why: Above service will return a PCollection, result the caller to produce a PCollection<PCollection<...>>
+    //      when do p.apply(...)
+    //
+    // REVISIT: cheap & nasty only for demo purpose
+    public static class BindiegoJdbcServiceExternal {
+        public static Map<String, String> read(final String jdbcClass, final String jdbcConn,
+                final String jdbcUsername, final String jdbcPassword) {
+            Map<String, String> dict = new HashMap<>();
+            Connection conn = null;
+
+            try {
+                Class.forName(jdbcClass);
+                conn = DriverManager.getConnection(
+                    jdbcConn, jdbcUsername, jdbcPassword);
+                Statement stmt = conn.createStatement();
+                ResultSet rs = stmt.executeQuery("select dim1, dim1_val from t_dim1;");
+
+                while(rs.next()) {
+                    dict.put(rs.getString(1), rs.getString(2));
+                }
+
+                dict.forEach((k, v) ->
+                    logger.debug("bindiego from mysql: key = " + k + " value = " + v));
+            } catch (Exception ex) {
+                logger.error(ex.getMessage(), ex);
+            } finally {
+                // if (conn != null)
+                try {
+                    conn.close();
+                } catch (Exception ex) {
+                    logger.warn(ex.getMessage(), ex);
+                }
+            }
+
+            /*
+            Instant now = Instant.now();
+            org.joda.time.format.DateTimeFormatter dtf = 
+                org.joda.time.format.DateTimeFormat.forPattern("HH:MM:SS");
+
+            dict.put("bindiego_A", now.minus(Duration.standardSeconds(30)).toString(dtf));
+            dict.put("bindiego_B", now.minus(Duration.standardSeconds(30)).toString());
+            */
+
+            return dict;
+        }
+    }
+
     static void run(BindiegoStreamingOptions options) throws Exception {
         // FileSystems.setDefaultPipelineOptions(options);
 
         Pipeline p = Pipeline.create(options);
+
+        // Create a side input as a lookup table in order to enrich the input data
+        // Long is NOT infinite, but should be fine mostly :-)
+        /* REVISIT: This does NOT work, when updated, consumer's corresponding window will
+         * receive another view, so asSingleton() will not work. Multimap may double the RAM
+         * usage which is not a viable solution IMO. I would recommend wait for retraction or
+         * simply update the pipeline.
+         */
+        /*
+        PCollectionView<Map<String, String>> lookupTable =
+            p.apply("Trigger for updating the side input (lookup table)", 
+                GenerateSequence.from(0).withRate(1, Duration.standardSeconds(20L)))// FIXME: hardcoded
+            .apply(
+                Window.<Long>into(new GlobalWindows())
+                    .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane()))
+                    .discardingFiredPanes())
+                    // .accumulatingAndRetractingFiredPanes())
+            .apply(
+                ParDo.of(
+                    new DoFn<Long, Map<String, String>>() {
+                        @ProcessElement
+                        public void process(
+                            @Element Long input,
+                            PipelineOptions po, 
+                            OutputReceiver<Map<String, String>> o) {
+                                BindiegoStreamingOptions op = po.as(BindiegoStreamingOptions.class);
+                                o.output(BindiegoJdbcServiceExternal.read(
+                                    op.getJdbcClass(),
+                                    op.getJdbcConn(),
+                                    op.getJdbcUsername(),
+                                    op.getJdbcPassword()
+                                ));
+                        }
+                    })
+            )
+            .apply(Latest.<Map<String, String>>globally())
+            .apply(View.asSingleton());
+        */
+
+        /*
+         * Debug code for JDBC data refresh
+         */
+        /*
+        p.apply(GenerateSequence.from(0).withRate(1, Duration.standardSeconds(2L)))
+            .apply(Window.into(FixedWindows.of(Duration.standardSeconds(10))))
+            .apply(Min.longsGlobally().withoutDefaults())
+            .apply(
+                ParDo.of(
+                    new DoFn<Long, KV<Long, Long>>() {
+                        @ProcessElement
+                        public void process(ProcessContext c) {
+                            Map<String, String> kv = c.sideInput(lookupTable);
+                            c.outputWithTimestamp(KV.of(1L, c.element()), Instant.now());
+
+                            logger.debug("bindiego consumer - lookup table size: " + kv.size());
+                            kv.forEach((k, v) ->
+                                logger.debug("bindiego cnsumer - Key = " + k + ", Value = " + v));
+                        }
+                    }
+                ).withSideInputs(lookupTable)
+            );
+        */
+
+        // Read JDBC lookup table
+        final PCollectionView<Map<String, String>> lookupTable = 
+            p.apply("Read lookup table from JDBC data source", 
+                    JdbcIO.<KV<String, String>>read()
+                // .withDataSourceConfiguration(
+                .withDataSourceProviderFn(JdbcIO.PoolableDataSourceProvider.of(
+                    JdbcIO.DataSourceConfiguration.create(
+                        options.getJdbcClass(), options.getJdbcConn())
+                    .withUsername(options.getJdbcUsername())
+                    .withPassword(options.getJdbcPassword())))
+                .withQuery("select dim1, dim1_val from t_dim1;") // FIXME: hardcoded
+                .withCoder(KvCoder.of(StringUtf8Coder.of(),
+                    StringUtf8Coder.of())) // e.g. BigEndianIntegerCoder.of() for Integer
+                .withRowMapper(new JdbcIO.RowMapper<KV<String, String>>() {
+                    public KV<String, String> mapRow(ResultSet resultSet) throws Exception {
+                        return KV.of(resultSet.getString(1), resultSet.getString(2)); // e.g. resultSet.getInt(1)
+                    }
+                })
+            )
+            .apply(View.<String, String>asMap());
 
         PCollection<PubsubMessage> messages = p.apply("Read Pubsub Events", 
             PubsubIO.readMessagesWithAttributesAndMessageId()
@@ -199,8 +357,9 @@ public class BindiegoStreaming {
                 .fromSubscription(options.getSubscription()));
 
         PCollectionTuple processedData = messages.apply("Extract CSV payload from pubsub message",
-            ParDo.of(new ExtractPayload())
-                .withOutputTags(STR_OUT, TupleTagList.of(STR_FAILURE_OUT)));
+            ParDo.of(new ExtractPayload(lookupTable))
+                .withOutputTags(STR_OUT, TupleTagList.of(STR_FAILURE_OUT))
+                .withSideInputs(lookupTable));
             // this usually used with TextIO 
             // .apply("Set event timestamp value", WithTimestamps.of(new SetTimestamp())); 
 
@@ -279,7 +438,7 @@ public class BindiegoStreaming {
                         String dataStr = ctx.element();
 
                         // REVISIT: damn ugly here, hard coded table schema
-                        String headers = "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts";
+                        String headers = "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val";
                         String[] cols = headers.split(",");
 
                         // REFISIT: options is NOT serializable, make a class for this transform
@@ -425,8 +584,9 @@ public class BindiegoStreaming {
         try {
             run(options);
         } catch (Exception ex) {
-            System.err.println(ex);
-            ex.printStackTrace();
+            //System.err.println(ex);
+            //ex.printStackTrace();
+            logger.error(ex.getMessage(), ex);
         }
     }
 

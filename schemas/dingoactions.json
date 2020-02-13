@@ -33,5 +33,10 @@
     "mode": "NULLABLE",
     "name": "process_ts",
     "type": "TIMESTAMP"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "dim1_val",
+    "type": "STRING"
   }
 ]}

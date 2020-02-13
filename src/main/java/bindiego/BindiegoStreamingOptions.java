@@ -8,9 +8,10 @@ import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.options.Validation.Required;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.NestedValueProvider;
+import org.apache.beam.runners.dataflow.options.DataflowWorkerLoggingOptions;
 
 public interface BindiegoStreamingOptions 
-        extends PipelineOptions, StreamingOptions {
+        extends PipelineOptions, StreamingOptions, DataflowWorkerLoggingOptions {
     @Description("Topic of pubsub")
     @Default.String("projects/google.com:bin-wus-learning-center/topics/dingoactions")
     ValueProvider<String> getTopic();
@@ -119,4 +120,24 @@ public interface BindiegoStreamingOptions
     @Required
     String getBtTableId();
     void setBtTableId(String value);
+
+    @Description("JDBC class")
+    @Required
+    String getJdbcClass();
+    void setJdbcClass(String value);
+
+    @Description("JDBC connection string")
+    @Required
+    String getJdbcConn();
+    void setJdbcConn(String value);
+
+    @Description("JDBC connections username")
+    @Required
+    String getJdbcUsername();
+    void setJdbcUsername(String value);
+
+    @Description("JDBC connection password")
+    @Required
+    String getJdbcPassword();
+    void setJdbcPassword(String value);
 }
