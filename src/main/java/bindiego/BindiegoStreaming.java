@@ -128,6 +128,8 @@ public class BindiegoStreaming {
                 String dimVal = dimTable.get(str.split(",")[4]);
                 dimVal = dimVal == null ? "Not Found" : dimVal;
 
+                str += ("," + dimVal);
+
                 logger.debug("Extracted raw message: " + str);
 
                 r.get(STR_OUT).output(str);
