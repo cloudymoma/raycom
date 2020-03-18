@@ -16,9 +16,14 @@ pubsub -> dataflow -> GCS(avro, csv for both data & deadleter) + BigQuery
 #### Quick start
 
 ##### Prerequisits
+
 Java dev environment
 - JDK8+
 - Maven
+
+Dimension table in MySQL
+
+You could use [this](https://github.com/bindiego/raycom/blob/streaming/scripts/dim1.sql) script to init the MySQL if you use [gcpplayground](https://github.com/bindiego/gcpplayground) to generate your messages. Also, you could simply use [this init script](https://github.com/bindiego/local_services/tree/develop/mysql) to run a MySQL instance in [Docker](https://github.com/bindiego/local_services/tree/develop/docker). 
 
 This branch is focusing on streaming, so the sample subscribes messages from Pubsub. It's easy to switch to KafkaIO in beam. But the quickest way to produce some dummy data then send to Pubsub for fun is by using [this](https://github.com/bindiego/gcpplayground) project.
 
