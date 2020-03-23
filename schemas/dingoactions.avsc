@@ -35,6 +35,39 @@
       {
         "name": "dim1_val",
         "type": "string"
+      },
+      {
+        "name": "window",
+        "type": "string"
+      },
+      {
+        "name": "pane_info",
+        "type": "string"
+      },
+      {
+        "name": "pane_idx",
+        "type": "long"
+      },
+      {
+        "name": "pane_nonspeculative_idx",
+        "type": "long"
+      },
+      {
+        "name": "is_first",
+        "type": "boolean"
+      },
+      {
+        "name": "is_last",
+        "type": "boolean"
+      },
+      {
+        "name": "pane_timing",
+        "type": "string"
+      },
+      {
+        "name": "pane_event_ts",
+        "type": "long",
+        "logicalType": "timestamp-millis"
       }
   ]
 }

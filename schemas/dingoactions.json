@@ -38,5 +38,45 @@
     "mode": "NULLABLE",
     "name": "dim1_val",
     "type": "STRING"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "window",
+    "type": "STRING"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "pane_info",
+    "type": "STRING"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "pane_idx",
+    "type": "INTEGER"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "pane_nonspeculative_idx",
+    "type": "INTEGER"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "is_first",
+    "type": "BOOLEAN"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "is_last",
+    "type": "BOOLEAN"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "pane_timing",
+    "type": "STRING"
+  },
+  {
+    "mode": "NULLABLE",
+    "name": "pane_event_ts",
+    "type": "TIMESTAMP"
   }
 ]}

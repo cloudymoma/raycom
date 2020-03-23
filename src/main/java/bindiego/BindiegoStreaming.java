@@ -110,7 +110,9 @@ public class BindiegoStreaming {
         public void processElement(ProcessContext ctx, MultiOutputReceiver r) 
                 throws IllegalArgumentException {
 
-            String str = null;
+            // StringBuilder sb = new StringBuilder(256);
+            StringBuilder sb = new StringBuilder();
+            String payload = null;
 
             Map<String, String> dimTable = ctx.sideInput(lookupTable);
 
@@ -120,33 +122,68 @@ public class BindiegoStreaming {
                 // CSV format
                 // raw:   "event_ts,thread_id,thread_name,seq,dim1,metrics1"
                 // after: "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
-                str = new String(psmsg.getPayload(), StandardCharsets.UTF_8)
-                    + "," // hardcoded csv delimiter
-                    + Long.valueOf(System.currentTimeMillis()).toString(); // append process timestamp
+                payload = new String(psmsg.getPayload(), StandardCharsets.UTF_8);
+                sb.append(payload)
+                    .append(',') // hardcoded csv delimiter
+                    .append(Long.valueOf(System.currentTimeMillis()).toString()); // append process timestamp
 
                 // dimemsion table lookup to complement dim value
-                String dimVal = dimTable.get(str.split(",")[4]);
+                String dimVal = dimTable.get(sb.toString().split(",")[4]);
                 dimVal = dimVal == null ? "Not Found" : dimVal;
 
-                str += ("," + dimVal);
+                sb.append(',')
+                    .append(dimVal);
 
-                logger.debug("Extracted raw message: " + str);
+                logger.debug("Extracted raw message: " + sb.toString());
 
-                r.get(STR_OUT).output(str);
+                r.get(STR_OUT).output(sb.toString());
 
                 // use this only if the element doesn't have an event timestamp attached to it
                 // e.g. extract 'extractedTs' from psmsg.split(",")[0] from a CSV payload
                 // r.get(STR_OUT).outputWithTimestamp(str, extractedTs);
             } catch (Exception ex) {
-                if (null == str)
-                    str = "AUTO_MSG failed to extract message";
-                r.get(STR_FAILURE_OUT).output(str);
+                if (null == payload)
+                    payload = "Failed to extract pubsub payload";
+
+                r.get(STR_FAILURE_OUT).output(payload);
 
                 logger.error("Failed extract pubsub message", ex);
             }
         }
 
         private final PCollectionView<Map<String, String>> lookupTable;
+    }
+
+    /**
+     * Append window information to the end of csv string/row
+     * <...>, window, pane_info, pane_idx, pane_nonspeculative_idx, 
+     *        is_first, is_last, pane_timing, pane_event_ts
+     *
+     * FIXME: you may want to handle errors here
+     */
+    public static class AppendWindowInfo extends DoFn<String, String> {
+        @ProcessElement
+        public void processElement(ProcessContext ctx, BoundedWindow window)
+                throws IllegalArgumentException {
+            
+            StringBuilder sb = new StringBuilder();
+
+            try {
+                sb.append(ctx.element())
+                    .append(',').append(window.toString())
+                    .append(',').append(ctx.pane().toString())
+                    .append(',').append(ctx.pane().getIndex())
+                    .append(',').append(ctx.pane().getNonSpeculativeIndex())
+                    .append(',').append(ctx.pane().isFirst())
+                    .append(',').append(ctx.pane().isLast())
+                    .append(',').append(ctx.pane().getTiming().toString())
+                    .append(',').append(ctx.timestamp().getMillis());
+
+                ctx.output(sb.toString());
+            } catch (Exception ex) {
+                logger.error("Failed to append window information", ex);
+            }
+        }
     }
 
     /* add timestamp for PCollection<T> data
@@ -384,7 +421,9 @@ public class BindiegoStreaming {
                     )
                     .discardingFiredPanes() // e.g. .accumulatingAndRetractingFiredPanes() etc.
                     .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY));
+                        ClosingBehavior.FIRE_IF_NON_EMPTY))
+            .apply("Append windowing information",
+                ParDo.of(new AppendWindowInfo()));
 
         /* 
          * @desc Use a composite trigger
@@ -444,8 +483,12 @@ public class BindiegoStreaming {
                         String dataStr = ctx.element();
 
                         // REVISIT: damn ugly here, hard coded table schema
-                        String headers = "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val";
-                        String[] cols = headers.split(",");
+                        String[] cols = (
+                                "event_ts,thread_id,thread_name,seq,dim1,metrics1" 
+                                + ",process_ts,dim1_val"
+                                + ",window,pane_info,pane_idx,pane_nonspeculative_idx"
+                                + ",is_first,is_last,pane_timing,pane_event_ts"
+                            ).split(",");
 
                         // REFISIT: options is NOT serializable, make a class for this transform
                         // String[] csvData = dataStr.split(options.getCsvDelimiter()); 
@@ -460,18 +503,18 @@ public class BindiegoStreaming {
                         for (int i = 0; i < loopCtr; ++i) {
                             // deal with non-string field in BQ
                             switch (i) {
-                                case 0:
-                                    row.set(cols[i], Long.parseLong(csvData[i])/1000);
+                                case 0: case 6:
+                                case 10: case 11:
+                                case 15:
+                                    row.set(cols[i], Long.parseLong(csvData[i]));
+                                    // row.set(cols[i], Long.parseLong(csvData[i])/1000);
                                     // row.set(cols[i], Integer.parseInt(csvData[i]));
                                     break;
-                                case 3:
+                                case 3: case 5:
                                     row.set(cols[i], Integer.parseInt(csvData[i]));
                                     break;
-                                case 5:
-                                    row.set(cols[i], Integer.parseInt(csvData[i]));
-                                    break;
-                                case 6:
-                                    row.set(cols[i], Long.parseLong(csvData[i])/1000);
+                                case 12: case 13:
+                                    row.set(cols[i], Boolean.parseBoolean(csvData[i]));
                                     break;
                                 default:
                                     row.set(cols[i], csvData[i]);
