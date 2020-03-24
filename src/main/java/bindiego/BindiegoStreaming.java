@@ -504,8 +504,7 @@ public class BindiegoStreaming {
                         for (int i = 0; i < loopCtr; ++i) {
                             // deal with non-string field in BQ
                             switch (i) {
-                                case 0: case 6:
-                                case 15:
+                                /*
                                     row.set(cols[i], 
                                         TimeUnit.MILLISECONDS.toSeconds(
                                             Long.parseLong(csvData[i])));
@@ -513,7 +512,10 @@ public class BindiegoStreaming {
                                     // row.set(cols[i], Long.parseLong(csvData[i])/1000);
                                     // row.set(cols[i], Integer.parseInt(csvData[i]));
                                     break;
+                                */
+                                case 0: case 6:
                                 case 10: case 11:
+                                case 15:
                                     row.set(cols[i], Long.parseLong(csvData[i]));
                                     break;
                                 case 3: case 5:
