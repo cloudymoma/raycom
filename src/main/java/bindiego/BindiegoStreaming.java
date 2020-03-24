@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.concurrent.TimeUnit;
 import java.sql.*;
 
 // Import SLF4J packages.
@@ -504,11 +505,16 @@ public class BindiegoStreaming {
                             // deal with non-string field in BQ
                             switch (i) {
                                 case 0: case 6:
-                                case 10: case 11:
                                 case 15:
-                                    row.set(cols[i], Long.parseLong(csvData[i]));
+                                    row.set(cols[i], 
+                                        TimeUnit.MILLISECONDS.toSeconds(
+                                            Long.parseLong(csvData[i])));
+                                    // row.set(cols[i], Long.parseLong(csvData[i]));
                                     // row.set(cols[i], Long.parseLong(csvData[i])/1000);
                                     // row.set(cols[i], Integer.parseInt(csvData[i]));
+                                    break;
+                                case 10: case 11:
+                                    row.set(cols[i], Long.parseLong(csvData[i]));
                                     break;
                                 case 3: case 5:
                                     row.set(cols[i], Integer.parseInt(csvData[i]));
