@@ -41,3 +41,7 @@ A: No. The application will create for you, and append to existing table by defa
 2. How to control the permissions?
 
 A: This project is currently relying on the service account specified by the `GOOGLE_APPLICATION_CREDENTIALS` environment variable. Consult [here](https://cloud.google.com/docs/authentication/getting-started) for details.
+
+3. More details for triggers?
+
+A: Hope [this](https://gist.github.com/bindiego/3814cfbd3b8d47216fe74686b0ae4339) example explained triggers well.
