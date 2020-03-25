@@ -407,32 +407,16 @@ public class BindiegoStreaming {
             // this usually used with TextIO 
             // .apply("Set event timestamp value", WithTimestamps.of(new SetTimestamp())); 
 
-        /* A terse approach */
-        PCollection<String> healthData = processedData.get(STR_OUT)
-            .apply(options.getWindowSize() + " window for healthy data",
-                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
-                    .triggering(
-                        // Repeatedly.forever(AfterWatermark.pastEndOfWindow()
-                        AfterWatermark.pastEndOfWindow()
-                            .withEarlyFirings(AfterProcessingTime.pastFirstElementInPane() 
-                                .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
-                            .withLateFirings(AfterPane.elementCountAtLeast(
-                                options.getLateFiringCount().intValue()))
-                        // )
-                    )
-                    .discardingFiredPanes() // e.g. .accumulatingAndRetractingFiredPanes() etc.
-                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY))
-            .apply("Append windowing information",
-                ParDo.of(new AppendWindowInfo()));
-
         /* 
          * @desc Use a composite trigger
+         *   Combine
          * - triggering every early firing period of processing time
          * - util watermark passes
          * - then triggering any time a late datum arrives
          * - up to a garbage collection horizon of allowed lateness of event time
          * - all with accumulation strategy turned on that specified in code
+         *
+         *   We should end up with timing for: EARLY, ON_TIME & LATE
          */
         /*
         PCollection<String> healthData = processedData.get(STR_OUT)
@@ -442,20 +426,45 @@ public class BindiegoStreaming {
                         AfterEach.inOrder(
                             Repeatedly.forever( 
                                 AfterProcessingTime.pastFirstElementInPane() 
-                                    .alignedTo(DurationUtils.parseDuration(
-                                        options.getEarlyFiringPeriod())))
+                                    // speculative result on a time basis
+                                    .plusDelayOf(DurationUtils.parseDuration(
+                                        options.getEarlyFiringPeriod()))
                                 .orFinally(AfterWatermark.pastEndOfWindow()),
                             Repeatedly.forever(
-                                AfterPane.elementCountAtLeast(
+                                AfterPane.elementCountAtLeast( // FIXME: should use other triggers
                                     options.getLateFiringCount().intValue()))
                         )
-                        //.orFinally(AfterWatermark.pastEndOfWindow()
-                        //    .plusDelayOf(DurationUtils.parseDuration(options.getAllowedLateness())))
                     )
-                    .discardingFiredPanes()
+                    .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
                     .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY));
+                        ClosingBehavior.FIRE_IF_NON_EMPTY))
+            .apply("Append windowing information",
+                ParDo.of(new AppendWindowInfo()));
         */
+
+        /* REVISIT: A terse approach */
+        PCollection<String> healthData = processedData.get(STR_OUT)
+            .apply(options.getWindowSize() + " window for healthy data",
+                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                    .triggering(
+                        AfterEach.inOrder(
+                            Repeatedly.forever(AfterWatermark.pastEndOfWindow()
+                                .withEarlyFirings(
+                                    AfterProcessingTime
+                                        .pastFirstElementInPane() 
+                                        .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                                .withLateFirings(
+                                    AfterPane.elementCountAtLeast(
+                                        options.getLateFiringCount().intValue()))
+                            )
+                        )
+                    )
+                    .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
+                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                        ClosingBehavior.FIRE_IF_NON_EMPTY))
+            .apply("Append windowing information",
+                ParDo.of(new AppendWindowInfo()));
+
 
         // REVISIT: we may apply differnet window for error data?
         PCollection<String> errData = processedData.get(STR_FAILURE_OUT)
