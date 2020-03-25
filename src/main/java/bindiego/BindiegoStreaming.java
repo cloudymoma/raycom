@@ -447,18 +447,14 @@ public class BindiegoStreaming {
             .apply(options.getWindowSize() + " window for healthy data",
                 Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
                     .triggering(
-                        AfterEach.inOrder(
-                            // Repeatedly.forever(AfterWatermark.pastEndOfWindow()
-                            AfterWatermark.pastEndOfWindow()
-                                .withEarlyFirings(
-                                    AfterProcessingTime
-                                        .pastFirstElementInPane() 
-                                        .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
-                                .withLateFirings(
-                                    AfterPane.elementCountAtLeast(
-                                        options.getLateFiringCount().intValue()))
-                            // )
-                        )
+                        AfterWatermark.pastEndOfWindow()
+                            .withEarlyFirings(
+                                AfterProcessingTime
+                                    .pastFirstElementInPane() 
+                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                            .withLateFirings(
+                                AfterPane.elementCountAtLeast(
+                                    options.getLateFiringCount().intValue()))
                     )
                     .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
                     .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
