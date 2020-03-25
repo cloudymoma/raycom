@@ -448,7 +448,8 @@ public class BindiegoStreaming {
                 Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
                     .triggering(
                         AfterEach.inOrder(
-                            Repeatedly.forever(AfterWatermark.pastEndOfWindow()
+                            // Repeatedly.forever(AfterWatermark.pastEndOfWindow()
+                            AfterWatermark.pastEndOfWindow()
                                 .withEarlyFirings(
                                     AfterProcessingTime
                                         .pastFirstElementInPane() 
@@ -456,7 +457,7 @@ public class BindiegoStreaming {
                                 .withLateFirings(
                                     AfterPane.elementCountAtLeast(
                                         options.getLateFiringCount().intValue()))
-                            )
+                            // )
                         )
                     )
                     .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
