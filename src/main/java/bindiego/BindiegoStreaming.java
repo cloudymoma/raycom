@@ -67,6 +67,7 @@ import org.apache.beam.sdk.transforms.windowing.AfterEach;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.Window.ClosingBehavior;
@@ -164,7 +165,7 @@ public class BindiegoStreaming {
      */
     public static class AppendWindowInfo extends DoFn<String, String> {
         @ProcessElement
-        public void processElement(ProcessContext ctx, BoundedWindow window)
+        public void processElement(ProcessContext ctx, IntervalWindow window)
                 throws IllegalArgumentException {
             
             StringBuilder sb = new StringBuilder();
