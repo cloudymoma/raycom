@@ -625,11 +625,6 @@ public class BindiegoStreaming {
                             .build()));
 
                 /*
-        new CloudBigtableTableConfiguration.Builder()
-            .withProjectId(options.getProject())
-            .withInstanceId(options.getBtInstanceId())
-            .withTableId(options.getBtTableIdWide())
-            .build();
             */
 
         // window/panes disgarding mode, good for wide table
@@ -653,7 +648,78 @@ public class BindiegoStreaming {
             .apply("Produce KV for aggregation operations", // produce PCollection<KV<String, String>>
                 ParDo.of(new ProduceKv(options.getCsvDelimiter())))
             .apply("group by dim1 for analysis", // produce PCollection<KV<String, Iterable<String>>>
-                GroupByKey.create());
+                GroupByKey.create())
+            .apply("Produce HBase/Bigtable wide table, window/pane info append to column names",
+                ParDo.of(new DoFn<KV<String, Iterable<String>>, Mutation>() {
+                    @ProcessElement
+                    public void processElement(ProcessContext ctx, IntervalWindow window)
+                             throws IllegalArgumentException {
+                        final long processTs = System.currentTimeMillis();
+
+                        // row key related value
+                        StringBuilder sb = new StringBuilder(ctx.element().getKey());
+
+                        // statistical data, choose the appropreate data types according to your case
+                        final byte[] stats_cf = Bytes.toBytes("stats");
+                        Integer count = 0;
+                        Integer sum = 0;
+                        Integer min = Integer.MAX_VALUE;
+                        Integer max = Integer.MIN_VALUE;
+                        Float avg = 0F;
+
+                        Iterable<String> csvLines = ctx.element().getValue();
+
+                        // i.e. "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
+                        for(String csvLine : csvLines) {
+                            String[] csvValues = csvLine.split(",");
+                            Integer metric = Integer.valueOf(csvValues[5]);
+
+                            ++count;
+
+                            sum += metric;
+
+                            if (min >  metric)
+                                min = metric;
+                            
+                            if (max < metric)
+                                max = metric;
+                        }
+
+                        if (count > 0)
+                            avg = sum.floatValue() / count;
+
+                        String pane_idx_str = String.valueOf(ctx.pane().getIndex());
+
+                        ctx.output(
+                            new Put(
+                                Bytes.toBytes(sb.append('#')
+                                    .append(String.valueOf(window.start().getMillis()))
+                                    .append('#')
+                                    .append(String.valueOf(window.end().getMillis())).toString())
+                            ).addColumn(stats_cf, Bytes.toBytes("num_records#" + pane_idx_str), 
+                                processTs,
+                                Bytes.toBytes(count.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("sum#" + pane_idx_str), 
+                                processTs,
+                                Bytes.toBytes(sum.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("max#" + pane_idx_str), 
+                                processTs,
+                                Bytes.toBytes(max.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("min#" + pane_idx_str), 
+                                processTs,
+                                Bytes.toBytes(min.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("avg#" + pane_idx_str), 
+                                processTs,
+                                Bytes.toBytes(avg.toString()))
+                        );
+                    }}))
+                .apply("Insert into Bigtable, wide schema",
+                    CloudBigtableIO.writeToTable(
+                        new CloudBigtableTableConfiguration.Builder()
+                            .withProjectId(options.getProject())
+                            .withInstanceId(options.getBtInstanceId())
+                            .withTableId(options.getBtTableIdWide())
+                            .build()));
 
         /* END - building realtime analytics */
 

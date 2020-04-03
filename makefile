@@ -96,16 +96,24 @@ drain:
 btcluster:
 	@cbt createinstance bigbase "Bigbase" bigbaby $(region)-a 1 SSD
 
+btrelease:
+	@cbt deleteinstance bigbase
+
 btinit:
 	@cbt createtable bttall && \
 		cbt createfamily bttall stats && \
 		cbt createfamily bttall window_info
 	-cbt ls bttall
-
-btdata:
-	@cbt read bttall count=10
+	@cbt createtable btwide && \
+		cbt createfamily btwide stats
+	-cbt ls btwide
 
 btclear:
-	@cbt deletetable bttall
+	@-cbt deletetable bttall
+	@-cbt deletetable btwide
 
-.PHONY: df dfup cancel drain btcluster btinit btdata btclear
+btdata:
+	@-echo "============= Tall ================"; cbt read bttall count=10
+	@-echo "============= Wide ================"; cbt read btwide count=10
+
+.PHONY: df dfup cancel drain btcluster btinit btdata btclear btrelease
