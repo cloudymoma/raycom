@@ -47,7 +47,8 @@ __dataflow() {
         --bqOutputTable=google.com:bin-wus-learning-center:raycom.dingoactions \
         --avroSchema=gs://bindiego/raycom/schemas/dingoactions.avsc \
         --btInstanceId=bigbase \
-        --btTableId=streaming \
+        --btTableIdTall=bttall \
+        --btTableIdWide=btwide \
         --jdbcClass=com.mysql.cj.jdbc.Driver \
         --jdbcConn=jdbc:mysql://10.140.0.3:3306/gcp \
         --jdbcUsername=gcp \

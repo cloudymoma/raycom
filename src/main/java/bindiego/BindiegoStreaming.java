@@ -14,13 +14,19 @@ import java.sql.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.util.Bytes;
+
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableSchema;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.Clustering;
-import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TimePartitioning;
+
+import com.google.cloud.bigtable.beam.CloudBigtableIO;
+import com.google.cloud.bigtable.beam.CloudBigtableTableConfiguration;
 
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.TextIO;
@@ -62,7 +68,6 @@ import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
-import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.AfterEach;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
@@ -72,7 +77,6 @@ import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.Window.ClosingBehavior;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
-import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.ToString;
 import org.apache.beam.sdk.transforms.WithTimestamps;
 import org.apache.beam.sdk.transforms.GroupByKey;
@@ -306,6 +310,31 @@ public class BindiegoStreaming {
         }
     }
 
+    /**
+     * Produce KV from the process CSV data for later 'aggregation by key' operations
+     *
+     * @Input processed csv data
+     * @Output <key, value> 
+     *         key = dim1, dim1 extraced from the processed csv data
+     *         value = process csv data
+     */
+    public static class ProduceKv extends DoFn<String, KV<String, String>> {
+        public ProduceKv(String delimiter) {
+            this.delimiter = delimiter;
+        }
+
+        @ProcessElement
+        public void processElement(ProcessContext ctx) throws IllegalArgumentException {
+            String[] csvData = ctx.element().split(delimiter);
+
+            //REVISIT: handle potential errors
+            
+            ctx.output(KV.of(csvData[4], ctx.element()));
+        }
+
+        private String delimiter;
+    }
+
     static void run(BindiegoStreamingOptions options) throws Exception {
         // FileSystems.setDefaultPipelineOptions(options);
 
@@ -392,8 +421,9 @@ public class BindiegoStreaming {
                     }
                 })
             )
-            .apply(View.<String, String>asMap());
+            .apply("Produce broadcast view for lookup", View.<String, String>asMap());
 
+        /* Raw data processing */
         PCollection<PubsubMessage> messages = p.apply("Read Pubsub Events", 
             PubsubIO.readMessagesWithAttributesAndMessageId()
                 .withIdAttribute(options.getMessageIdAttr())
@@ -408,6 +438,13 @@ public class BindiegoStreaming {
             // this usually used with TextIO 
             // .apply("Set event timestamp value", WithTimestamps.of(new SetTimestamp())); 
 
+        /* Realtime data analysis */
+        // HBase/BigTable or Elasticsearch
+        //
+        // Use HBase/BigTable as an example, since we could show both wide and tall schema for 
+        // window accumulating and disarding mode according to your specific scenario
+
+        /* Various outputs for detailed data */
         /* 
          * @desc Use a composite trigger
          *   Combine
@@ -463,11 +500,162 @@ public class BindiegoStreaming {
             .apply("Append windowing information",
                 ParDo.of(new AppendWindowInfo()));
 
-
         // REVISIT: we may apply differnet window for error data?
         PCollection<String> errData = processedData.get(STR_FAILURE_OUT)
             .apply(options.getWindowSize() + " window for error data",
                 Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
+
+        /* START - building realtime analytics */
+        // we use dim1 as key to do the analysis
+        // REVISIT: we applied the same windowing functions here, it could/should be different tho
+
+        // window/panes accumulating mode, good for tall table
+        processedData.get(STR_OUT)
+            .apply(options.getWindowSize() 
+                    + " window for healthy data in KV for real time analysis, accumulating mode",
+                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                    .triggering(
+                        AfterWatermark.pastEndOfWindow()
+                            .withEarlyFirings(
+                                AfterProcessingTime
+                                    .pastFirstElementInPane() 
+                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                            .withLateFirings(
+                                AfterPane.elementCountAtLeast(
+                                    options.getLateFiringCount().intValue()))
+                    )
+                    .accumulatingFiredPanes()
+                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                        ClosingBehavior.FIRE_IF_NON_EMPTY))
+            .apply("Produce KV for aggregation operations", // produce PCollection<KV<String, String>>
+                ParDo.of(new ProduceKv(options.getCsvDelimiter())))
+            .apply("group by dim1 for analysis", // produce PCollection<KV<String, Iterable<String>>>
+                GroupByKey.create())
+            .apply("Produce HBase/Bigtable tall table",
+                ParDo.of(new DoFn<KV<String, Iterable<String>>, Put>() {
+                    @ProcessElement
+                    public void processElement(ProcessContext ctx) {
+                        final long processTs = System.currentTimeMillis();
+
+                        // row key related value
+                        StringBuilder sb = new StringBuilder(ctx.element().getKey());
+
+                        // statistical data, choose the appropreate data types according to your case
+                        final byte[] stats_cf = Bytes.toBytes("stats");
+                        Integer count = 0;
+                        Integer sum = 0;
+                        Integer min = Integer.MAX_VALUE;
+                        Integer max = Integer.MIN_VALUE;
+                        Float avg = 0F;
+
+                        Iterable<String> csvLines = ctx.element().getValue();
+
+                        // i.e. "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
+                        for(String csvLine : csvLines) {
+                            String[] csvValues = csvLine.split(",");
+                            Integer metric = Integer.valueOf(csvValues[5]);
+
+                            ++count;
+
+                            sum += metric;
+
+                            if (min >  metric)
+                                min = metric;
+                            
+                            if (max < metric)
+                                max = metric;
+                        }
+
+                        if (count > 0)
+                            avg = sum.floatValue() / count;
+
+                        ctx.output(
+                            new Put(
+                                Bytes.toBytes(sb.append('#')
+                                    .append(Long.MAX_VALUE - processTs).toString())
+                            ).addColumn(stats_cf, Bytes.toBytes("num_records"), processTs,
+                                Bytes.toBytes(count.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("sum"), processTs,
+                                Bytes.toBytes(sum.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("max"), processTs,
+                                Bytes.toBytes(max.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("min"), processTs,
+                                Bytes.toBytes(min.toString()))
+                            .addColumn(stats_cf, Bytes.toBytes("avg"), processTs,
+                                Bytes.toBytes(avg.toString()))
+                        );
+                    }}))
+                .apply("Append window information",
+                    ParDo.of(new DoFn<Put, Mutation>() {
+                        @ProcessElement
+                        public void processElement(ProcessContext ctx, IntervalWindow window)
+                            throws IllegalArgumentException {
+
+                            final byte[] win_cf = Bytes.toBytes("window_info");
+
+                            Put p = ctx.element();
+
+                            p.addColumn(win_cf, Bytes.toBytes("window"),
+                                    Bytes.toBytes(window.toString()))
+                                .addColumn(win_cf, Bytes.toBytes("pane"),
+                                    Bytes.toBytes(ctx.pane().toString()))
+                                .addColumn(win_cf, Bytes.toBytes("pane_idx"),
+                                    Bytes.toBytes(String.valueOf(ctx.pane().getIndex())))
+                                .addColumn(win_cf, Bytes.toBytes("pane_nonspeculative_idx"),
+                                    Bytes.toBytes(String.valueOf(ctx.pane().getNonSpeculativeIndex())))
+                                .addColumn(win_cf, Bytes.toBytes("is_first"),
+                                    Bytes.toBytes(String.valueOf(ctx.pane().isFirst())))
+                                .addColumn(win_cf, Bytes.toBytes("is_last"),
+                                    Bytes.toBytes(String.valueOf(ctx.pane().isLast())))
+                                .addColumn(win_cf, Bytes.toBytes("timing"),
+                                    Bytes.toBytes(ctx.pane().getTiming().toString()))
+                                .addColumn(win_cf, Bytes.toBytes("win_start_ts"),
+                                    Bytes.toBytes(String.valueOf(window.start().getMillis())))
+                                .addColumn(win_cf, Bytes.toBytes("win_end_ts"),
+                                    Bytes.toBytes(String.valueOf(window.end().getMillis())));
+
+                            ctx.output(p);
+                        }}))
+                .apply("Insert into Bigtable, tall schema",
+                    CloudBigtableIO.writeToTable(
+                        new CloudBigtableTableConfiguration.Builder()
+                            .withProjectId(options.getProject())
+                            .withInstanceId(options.getBtInstanceId())
+                            .withTableId(options.getBtTableIdTall())
+                            .build()));
+
+                /*
+        new CloudBigtableTableConfiguration.Builder()
+            .withProjectId(options.getProject())
+            .withInstanceId(options.getBtInstanceId())
+            .withTableId(options.getBtTableIdWide())
+            .build();
+            */
+
+        // window/panes disgarding mode, good for wide table
+        processedData.get(STR_OUT)
+            .apply(options.getWindowSize() 
+                    + " window for healthy data in KV for real time analysis, disgarding mode",
+                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                    .triggering(
+                        AfterWatermark.pastEndOfWindow()
+                            .withEarlyFirings(
+                                AfterProcessingTime
+                                    .pastFirstElementInPane() 
+                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                            .withLateFirings(
+                                AfterPane.elementCountAtLeast(
+                                    options.getLateFiringCount().intValue()))
+                    )
+                    .discardingFiredPanes() 
+                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                        ClosingBehavior.FIRE_IF_NON_EMPTY))
+            .apply("Produce KV for aggregation operations", // produce PCollection<KV<String, String>>
+                ParDo.of(new ProduceKv(options.getCsvDelimiter())))
+            .apply("group by dim1 for analysis", // produce PCollection<KV<String, Iterable<String>>>
+                GroupByKey.create());
+
+        /* END - building realtime analytics */
 
         healthData.apply("Write windowed healthy CSV files", 
             TextIO.write()
@@ -639,10 +827,17 @@ public class BindiegoStreaming {
 
 
     public static void main(String... args) {
-        BindiegoStreamingOptions options = PipelineOptionsFactory
-            .fromArgs(args).withValidation().as(BindiegoStreamingOptions.class);
-        options.setStreaming(true);
+        PipelineOptionsFactory.register(BindiegoStreamingOptions.class);
 
+        BindiegoStreamingOptions options = PipelineOptionsFactory
+            .fromArgs(args)
+            .withValidation()
+            .as(BindiegoStreamingOptions.class);
+        options.setStreaming(true);
+        // options.setRunner(DataflowRunner.class);
+        // options.setNumWorkers(2);
+        // options.setUsePublicIps(true);
+        
         try {
             run(options);
         } catch (Exception ex) {

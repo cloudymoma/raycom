@@ -35,10 +35,11 @@
 
     <bigquery.version>v2-rev20191211-1.30.9</bigquery.version>
     <bigtable.ver>1.14.0</bigtable.ver>
-    <google-clients.version>1.27.0</google-clients.version>
-    <guava.version>28.1-jre</guava.version>
+    <google-api-clients.version>1.30.9</google-api-clients.version>
+    <google-http-clients.version>1.34.2</google-http-clients.version>
+    <guava.version>28.2-jre</guava.version>
     <hamcrest.version>1.3</hamcrest.version>
-    <jackson.version>2.9.8</jackson.version>
+    <jackson.version>2.10.4</jackson.version>
     <joda.version>2.10.5</joda.version>
     <junit.version>4.13</junit.version>
     <maven-compiler-plugin.version>3.7.0</maven-compiler-plugin.version>
@@ -46,7 +47,7 @@
     <maven-jar-plugin.version>3.0.2</maven-jar-plugin.version>
     <maven-shade-plugin.version>3.1.0</maven-shade-plugin.version>
     <mockito.version>1.10.19</mockito.version>
-    <pubsub.version>v1-rev20181105-1.27.0</pubsub.version>
+    <pubsub.version>v1-rev452-1.25.0</pubsub.version>
     <slf4j.version>1.7.25</slf4j.version>
     <spark.version>2.4.0</spark.version>
     <hadoop.version>2.7.3</hadoop.version>
@@ -396,12 +397,24 @@
         <artifactId>bigtable-hbase-beam</artifactId>
         <version>${bigtable.ver}</version>
     </dependency>
+    <!--
+    <dependency>
+        <groupId>com.google.cloud.bigtable</groupId>
+        <artifactId>bigtable-hbase</artifactId>
+        <version>${bigtable.ver}</version>
+    </dependency>
+    <dependency>
+        <groupId>com.google.cloud.bigtable</groupId>
+        <artifactId>bigtable-client-core</artifactId>
+        <version>${bigtable.ver}</version>
+    </dependency>
+    -->
 
     <!-- Dependencies below this line are specific dependencies needed by the examples code. -->
     <dependency>
       <groupId>com.google.api-client</groupId>
       <artifactId>google-api-client</artifactId>
-      <version>${google-clients.version}</version>
+      <version>${google-api-clients.version}</version>
       <exclusions>
         <!-- Exclude an old version of guava that is being pulled
              in by a transitive dependency of google-api-client -->
@@ -429,7 +442,7 @@
     <dependency>
       <groupId>com.google.http-client</groupId>
       <artifactId>google-http-client</artifactId>
-      <version>${google-clients.version}</version>
+      <version>${google-http-clients.version}</version>
       <exclusions>
         <!-- Exclude an old version of guava that is being pulled
              in by a transitive dependency of google-api-client -->

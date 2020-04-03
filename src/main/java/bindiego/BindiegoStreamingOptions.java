@@ -8,10 +8,12 @@ import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.options.Validation.Required;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.NestedValueProvider;
+import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.runners.dataflow.options.DataflowWorkerLoggingOptions;
 
 public interface BindiegoStreamingOptions 
-        extends PipelineOptions, StreamingOptions, DataflowWorkerLoggingOptions {
+        extends PipelineOptions, StreamingOptions, 
+                DataflowPipelineOptions, DataflowWorkerLoggingOptions {
     @Description("Topic of pubsub")
     @Default.String("projects/google.com:bin-wus-learning-center/topics/dingoactions")
     ValueProvider<String> getTopic();
@@ -116,10 +118,15 @@ public interface BindiegoStreamingOptions
     String getBtInstanceId();
     void setBtInstanceId(String value);
 
-    @Description("Bigtable Table Id to write realtime data to")
+    @Description("Bigtable Table Id to write realtime data to, tall table")
     @Required
-    String getBtTableId();
-    void setBtTableId(String value);
+    String getBtTableIdTall();
+    void setBtTableIdTall(String value);
+
+    @Description("Bigtable Table Id to write realtime data to, wide table")
+    @Required
+    String getBtTableIdWide();
+    void setBtTableIdWide(String value);
 
     @Description("JDBC class")
     @Required
