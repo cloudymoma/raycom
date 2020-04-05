@@ -1,6 +1,6 @@
 ## Apache Beam Sample
 
-[![Build Status](https://jenkins.bindiego.com/job/raycom-streaming/badge/icon)](https://jenkins.bindiego.com/job/raycom-streaming/)
+[![Build Status](https://jenkins.bindiego.com/buildStatus/icon?job=raycom-streaming)](https://jenkins.bindiego.com/job/raycom-streaming/)
 
 You can use this master branch as a skeleton java project
 
