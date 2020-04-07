@@ -4,6 +4,10 @@
 
 You can use this master branch as a skeleton java project
 
+master分支可以用来当作一个骨架项目
+
+beam代码理论上可以驱动spark，flink等等流式框架，详情参考[这里](https://beam.apache.org/documentation/runners/capability-matrix/)
+
 ### Proposed streaming pipeline
 
 #### IMPORTANT: in the sample code, assume the pubsub message is csv text encoded in utf-8
@@ -13,7 +17,7 @@ pubsub/kafka -> dataflow/flink -> GCS(avro, csv for both data & deadleter) + Big
 #### Current pipeline DAG
 ![](https://raw.githubusercontent.com/bindiego/raycom/streaming/miscs/pipeline_dag.png)
 
-#### Quick start
+#### Quick start 快速开始
 
 ##### Prerequisits
 
@@ -21,11 +25,13 @@ Java dev environment
 - JDK8+
 - Maven
 
-##### Dimension table in MySQL
+##### Dimension table in MySQL 维度表，这里用MySQL，假设可以全部加载到内存以分发到所有worker
+
+项目里提供了初始化脚本 `scripts/dim1.sql` 维表更新的话直接`update`整个管道就可以了，如果维表需要LRU策略保留在内存，目前还没有办法。
 
 You could use [this](https://github.com/bindiego/raycom/blob/streaming/scripts/dim1.sql) script to init the MySQL if you use [gcpplayground](https://github.com/bindiego/gcpplayground) to generate your messages. Also, you could simply use [this init script](https://github.com/bindiego/local_services/tree/develop/mysql) to run a MySQL instance in [Docker](https://github.com/bindiego/local_services/tree/develop/docker). 
 
-##### Bigtable init
+##### Bigtable init 初始化Bigtable，可以用HBase代替
 
 You could use `make` to initialize the Bigtable enviroment. Adjust the parameters in `makefile` accordingly, e.g. cluster name, region etc.
 
@@ -48,6 +54,8 @@ make df
 ##### Caveats
 
 The purpose of this project is only to show you how to quickly run a streaming pipeline in Dataflow and the concepts about windowing, triggers & watermark. Even though the running cluster is elastic, you'd better break this big DAG into smaller pipelines and use Pubsub(or Kafka) as a 'communication bus' for better computing resources utilization and easy/faster recovery. Also, there are ways you could improve the performance, i.e. csv data handling etc. It's not the purpose of this example.
+
+这里的代码示例主要为了说明beam的工作原理（触发器、窗口、水印等等）和一般实时+线下adhoc数据分析的一个大体框架。虽然Dataflow引擎可以动态伸缩，如果其他不能动态伸缩的引擎，就更需要把这个大的DAG拆分成一些小的管道，使用发布/订阅引擎作为数据交换媒介。这样维护起来比较清晰，更能提高计算资源的利用率，还在出错的时候相对快的恢复（暴力重跑啥的）。当然，数据处理的效率还有很多优化空间，大家要根据具体场景去做，因为没有唯一标准答案，也就不在这里下功夫了。
 
 #### FAQ
 1. Do I need to setup the BigQuery table in advance?
