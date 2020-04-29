@@ -55,6 +55,7 @@
     <nemo.version>0.1</nemo.version>
     <json.version>20160810</json.version>
     <mysql.ver>8.0.19</mysql.ver>
+    <elastic.ver>7.6.2</elastic.ver>
   </properties>
 
   <repositories>
@@ -546,6 +547,18 @@
         <groupId>mysql</groupId>
         <artifactId>mysql-connector-java</artifactId>
         <version>${mysql.ver}</version>
-        </dependency>
+    </dependency>
+
+    <!-- Elasticsearch REST Client -->
+    <dependency>
+      <groupId>org.elasticsearch.client</groupId>
+      <artifactId>elasticsearch-rest-client</artifactId>
+      <version>${elastic.ver}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.elasticsearch.client</groupId>
+      <artifactId>elasticsearch-rest-high-level-client</artifactId>
+      <version>${elastic.ver}</version>
+    </dependency>
   </dependencies>
 </project>
