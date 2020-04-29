@@ -12,10 +12,17 @@ beam代码理论上可以驱动spark，flink等等流式框架，详情参考[�
 
 #### IMPORTANT: in the sample code, assume the pubsub message is csv text encoded in utf-8
 
-pubsub/kafka -> dataflow/flink -> GCS(avro, csv for both data & deadleter) + BigQuery + HBase/Bigtable (realtime analysis)
+pubsub/kafka -> dataflow/flink -> join dimesion table -> data processing (realtime calculation + data warehouse ingestion + back files) -> GCS(avro, csv for both data & deadleter) + BigQuery + HBase/Bigtable (realtime analysis) + Elasticsearch
 
 #### Current pipeline DAG
 ![](https://raw.githubusercontent.com/bindiego/raycom/streaming/miscs/pipeline_dag.png)
+
+- Data consumption from message queue (Pubsub / Kafka)
+- Raw data *join* dimension table, MySQL & fit in memroy
+- Windowed data really time aggregation then ingest into Bigtable / Hbase
+- Hot data ingest into Elasticsearch for realtime analysis
+- Ingest into data warehouse (BigQuery) for big data analysis
+- Data backup into files (Avro + CSV)
 
 #### Quick start 快速开始
 
@@ -35,11 +42,11 @@ You could use [this](https://github.com/bindiego/raycom/blob/streaming/scripts/d
 
 You could use `make` to initialize the Bigtable enviroment. Adjust the parameters in `makefile` accordingly, e.g. cluster name, region etc.
 
-Create Bigtable cluster, run it once
+Create Bigtable cluster, run it once. 拉起一个Bigtable集群实例。
 
 `make btcluster`
 
-Setup Bigtable tables, both tall and wide
+Setup Bigtable tables, both tall and wide. 这步会建立一个宽表和一个高表分别用来储存实时分析的数据。
 
 `make btinit`
 
@@ -50,6 +57,35 @@ If you use the [GCP Play Ground](https://github.com/bindiego/gcpplayground) to p
 ```
 make df
 ```
+
+##### Elasticsearch index & kibana index pattern initialization, ES索引和Kibana的index pattern初始化
+
+- Create an ES index template, so created index will share the same attributes (settings, mappings etc.)
+- Create a Kibana index pattern for query those indices
+
+You could use the following scripts for above purposes, but remember to modify the `init.sh` accordingly for connection parameter.
+
+跑初始化脚本前需要注意更新下面4个参数，分别是es的访问地址、kibana的访问地址、用户名和密码。
+
+```
+es_client=https://k8es.client.bindiego.com
+kbn_host=https://k8na.bindiego.com
+es_user=elastic
+es_pass=<password>
+```
+
+then run,
+
+```shell
+cd scripts/elastic
+./init.sh
+```
+
+In dataflow, especially a streaming job, we may want to ingest the data into different indices based on time, like daily or month all share the same prefix, so do attrubutes.
+
+You should update `./scripts/elastic/index-raycom-template.json` accordingly.
+
+初始化ES模版的目的是让Dataflow在注入数据的时候可能会根据时间去建立新的索引，这样他们都具备相同的属性了。那么Kibana里也可以通过同一个索引pattern进行查询。请根据需要设置`./scripts/elastic/index-raycom-template.json`来设置索引属性，然后到`./scripts/elastic`目录下运行`./init.sh`来完成初始化。
 
 ##### Caveats
 
