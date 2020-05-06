@@ -50,20 +50,14 @@ Setup Bigtable tables, both tall and wide. 这步会建立一个宽表和一个�
 
 `make btinit`
 
-This branch is focusing on streaming, so the sample subscribes messages from Pubsub. It's easy to switch to KafkaIO in beam. But the quickest way to produce some dummy data then send to Pubsub for fun is by using [this](https://github.com/bindiego/gcpplayground) project.
-
-If you use the [GCP Play Ground](https://github.com/bindiego/gcpplayground) to produce the pubsub message, there isn't much to do. Simply update the `run` shell script, make sure you have the corresponding permissions to manipulate the GCP resources. Then
-
-```
-make df
-```
-
 ##### Elasticsearch index & kibana index pattern initialization, ES索引和Kibana的index pattern初始化
 
-- Create an ES index template, so created index will share the same attributes (settings, mappings etc.)
+This step is **optional** but you may need to plan ahead for best practices, especially for streaming jobs.
+
+- Create an ES [index template](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-templates.html), so created index will share the same attributes (settings, mappings etc.)
 - Create a Kibana index pattern for query those indices
 
-You could use the following scripts for above purposes, but remember to modify the `init.sh` accordingly for connection parameter.
+You could use the following scripts for above purposes, but remember to modify the `init.sh` accordingly for connection parameters.
 
 跑初始化脚本前需要注意更新下面4个参数，分别是es的访问地址、kibana的访问地址、用户名和密码。
 
@@ -74,18 +68,37 @@ es_user=elastic
 es_pass=<password>
 ```
 
+Also, you should update `./scripts/elastic/index-raycom-template.json` accordingly to define the index schema and settings.
+
+初始化ES模版的目的是在注入数据的时候可能会根据时间去建立新的索引，这样他们都具备相同的属性了。那么Kibana里也可以通过同一个索引pattern进行查询。请根据需要设置`./scripts/elastic/index-raycom-template.json`来设置索引属性，然后到`./scripts/elastic`目录下运行`./init.sh`来完成初始化。
+
 then run,
 
 ```shell
 cd scripts/elastic
+
 ./init.sh
 ```
 
-In dataflow, especially a streaming job, we may want to ingest the data into different indices based on time, like daily or month all share the same prefix, so do attrubutes.
+Finally, you may want to ingest data into different indices on a time basis, like hourly, daily or month. This could be controlled by using [Index alias](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-add-alias.html). So your dataflow job can only specify the name of the alias on start. [Curator](https://www.elastic.co/guide/en/elasticsearch/client/curator/5.8/alias.html) is the tool can automate this process or schedule your own jobs.
 
-You should update `./scripts/elastic/index-raycom-template.json` accordingly.
+Other out of scope topics on Elastic best practices,
 
-初始化ES模版的目的是让Dataflow在注入数据的时候可能会根据时间去建立新的索引，这样他们都具备相同的属性了。那么Kibana里也可以通过同一个索引pattern进行查询。请根据需要设置`./scripts/elastic/index-raycom-template.json`来设置索引属性，然后到`./scripts/elastic`目录下运行`./init.sh`来完成初始化。
+- [Index Lifecycle Management](https://www.elastic.co/guide/en/elasticsearch/reference/current/index-lifecycle-management.html)
+- [Snapshots & Restore](https://www.elastic.co/guide/en/elasticsearch/reference/current/snapshot-restore.html)
+- Elastic stack deployment: [Auto scripts](https://github.com/bindiego/local_services/tree/develop/elastic) or [on k8s / GKE](https://github.com/bindiego/local_services/tree/develop/k8s/gke/elastic)
+
+##### Run the pipeline
+
+This branch is focusing on streaming, so the sample subscribes messages from Pubsub. It's easy to switch to KafkaIO in beam. But the quickest way to produce some dummy data then send to Pubsub for fun is by using [this](https://github.com/bindiego/gcpplayground) project.
+
+If you use the [GCP Play Ground](https://github.com/bindiego/gcpplayground) to produce the pubsub message, there isn't much to do. Simply update the `run` shell script, make sure you have the corresponding permissions to manipulate the GCP resources.
+
+Double check the paramters passed to the job trigger in `makefile`, then,
+
+```
+make df
+```
 
 ##### Caveats
 
@@ -105,3 +118,11 @@ A: This project is currently relying on the service account specified by the `GO
 3. More details for triggers?
 
 A: Hope [this](https://gist.github.com/bindiego/3814cfbd3b8d47216fe74686b0ae4339) example explained triggers well.
+
+4. The DAG is too complicated?
+
+A: You will need to comment out the code blocks in the [job code file](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java) to simplify it to get a really quick start. Or *master branch* could be another go :)
+
+5. Elasticsearch index alias cannot guarantee all data in a particular window falls into corresponding index during rotation.
+
+A: This actually doesn't matter since you query multiple indices / index pattern anyway.
