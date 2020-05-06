@@ -52,7 +52,9 @@ Setup Bigtable tables, both tall and wide. 这步会建立一个宽表和一个�
 
 ##### Elasticsearch index & kibana index pattern initialization, ES索引和Kibana的index pattern初始化
 
-This step is **optional** but you may need to plan ahead for best practices, especially for streaming jobs.
+The minimum requirement here is to create a targeting index in advance or the job will fail. We'd better not let beam/dataflow to do that.
+
+Following steps are **optional** but you may need to plan ahead for best practices, especially for streaming jobs.
 
 - Create an ES [index template](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-templates.html), so created index will share the same attributes (settings, mappings etc.)
 - Create a Kibana index pattern for query those indices
