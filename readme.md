@@ -15,7 +15,7 @@ beam代码理论上可以驱动spark，flink等等流式框架，详情参考[�
 pubsub/kafka -> dataflow/flink -> join dimesion table -> data processing (realtime calculation + data warehouse ingestion + back files) -> GCS(avro, csv for both data & deadleter) + BigQuery + HBase/Bigtable (realtime analysis) + Elasticsearch
 
 #### Current pipeline DAG
-![](https://raw.githubusercontent.com/bindiego/raycom/streaming/miscs/pipeline_dag.png)
+![](https://raw.githubusercontent.com/cloudymoma/raycom/streaming/miscs/pipeline_dag.png)
 
 - Data consumption from message queue (Pubsub / Kafka)
 - Raw data *join* dimension table, MySQL & fit in memroy
