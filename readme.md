@@ -58,6 +58,7 @@ Following steps are **optional** but you may need to plan ahead for best practic
 
 - Create an ES [index template](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-templates.html), so created index will share the same attributes (settings, mappings etc.)
 - Create a Kibana index pattern for query those indices
+- Create an ES index alias for ingestion, then rollover manualy or automatically
 
 You could use the following scripts for above purposes, but remember to modify the `init.sh` accordingly for connection parameters.
 
@@ -82,7 +83,69 @@ cd scripts/elastic
 ./init.sh
 ```
 
-Finally, you may want to ingest data into different indices on a time basis, like hourly, daily or month. This could be controlled by using [Index alias](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-add-alias.html). So your dataflow job can only specify the name of the alias on start. [Curator](https://www.elastic.co/guide/en/elasticsearch/client/curator/5.8/alias.html) is the tool can automate this process or schedule your own jobs.
+Finally, you may want to ingest data into different indices on a time basis, like hourly, daily or monthly. This could be controlled by using [Index alias](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-add-alias.html). So your dataflow job can only specify the name of the alias on start. [Curator](https://www.elastic.co/guide/en/elasticsearch/client/curator/5.8/alias.html) is the tool can automate this process or schedule your own jobs.
+
+Let's do this manually in the Kibana **Dev Tools** UI
+
+- Create an index for ingestion
+
+```
+PUT raycom-dataflow
+```
+
+- Create an index alias
+```
+POST /_aliases
+{
+  "actions": [
+    {
+      "add": {
+        "index": "raycom-dataflow",
+        "alias": "raycom-dataflow-ingest"
+      }
+    }
+  ]
+}
+```
+
+- (Optional) Later you may want to ingest into a new index without updating the dataflow job, you could do this
+```
+POST /_aliases
+{
+  "actions": [
+    {
+      "remove": {
+        "index": "raycom-dataflow",
+        "alias": "raycom-dataflow-ingest"
+      },
+      "add": {
+        "index": "raycom-dataflow",
+        "alias": "raycom-dataflow-ingest-new"
+      }
+    }
+  ]
+}
+```
+
+- (Optional) Alternatively, you could setup [index rollover](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-rollover-index.html)
+
+```
+PUT raydom-dataflow-000001
+{
+  "aliases": {
+    "raycom-dataflow-ingest": { "is_write_index": true } 
+  }
+}
+
+POST /raycom-dataflow-ingest/_rollover 
+{
+  "conditions": {
+    "max_age":   "7d",
+    "max_docs":  1000000,
+    "max_size":  "5gb"
+  }
+}
+```
 
 Other out of scope topics on Elastic best practices,
 
