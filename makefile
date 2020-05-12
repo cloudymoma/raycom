@@ -5,6 +5,10 @@ jdbcusr := gcp
 jdbcpwd := gcp2020
 region := asia-east1
 job := raycom-streaming
+eshost := https://k8es.ingest.bindiego.com
+esuser := elastic
+espass := changeme
+esindex := raycom-dataflow-ingest
 
 dfup:
 	@mvn -Pdataflow-runner compile exec:java \
@@ -42,6 +46,10 @@ dfup:
         --jdbcConn=$(jdbcuri) \
         --jdbcUsername=$(jdbcusr) \
         --jdbcPassword=$(jdbcpwd) \
+        --esHost=$(eshost) \
+        --esUser=$(esuser) \
+        --esPass=$(espass) \
+        --esIndex=$(esindex) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --update \
@@ -83,6 +91,10 @@ df:
         --jdbcConn=$(jdbcuri) \
         --jdbcUsername=$(jdbcusr) \
         --jdbcPassword=$(jdbcpwd) \
+        --esHost=$(eshost) \
+        --esUser=$(esuser) \
+        --esPass=$(espass) \
+        --esIndex=$(esindex) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region)"

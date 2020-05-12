@@ -147,4 +147,24 @@ public interface BindiegoStreamingOptions
     @Required
     String getJdbcPassword();
     void setJdbcPassword(String value);
+
+    @Description("Elasticsearch host, usually a LB for coordinating nodes. e.g. https://es.ingest.abc.com")
+    @Required
+    String getEsHost();
+    void setEsHost(String value);
+
+    @Description("Elasticsearch user")
+    @Required
+    String getEsUser();
+    void setEsUser(String value);
+
+    @Description("Elasticsearch password")
+    @Required
+    String getEsPass();
+    void setEsPass(String value);
+
+    @Description("Elasticsearch index, usually an alias for index lifecycle management")
+    @Required
+    String getEsIndex();
+    void setEsIndex(String value);
 }

@@ -99,10 +99,12 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
+import org.codehaus.jackson.map.ObjectMapper;
 
 import bindiego.io.WindowedFilenamePolicy;
 import bindiego.utils.DurationUtils;
 import bindiego.utils.SchemaParser;
+import bindiego.io.ElasticsearchIO;
 
 public class BindiegoStreaming {
     /* extract the csv payload from message */
@@ -722,6 +724,85 @@ public class BindiegoStreaming {
                             .build()));
 
         /* END - building realtime analytics */
+
+        /* Elasticsearch */
+        processedData.get(STR_OUT)
+            .apply(options.getWindowSize() + " window for healthy data",
+                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                    .triggering(
+                        AfterWatermark.pastEndOfWindow()
+                            .withEarlyFirings(
+                                AfterProcessingTime
+                                    .pastFirstElementInPane() 
+                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                            .withLateFirings(
+                                AfterPane.elementCountAtLeast(
+                                    options.getLateFiringCount().intValue()))
+                    )
+                    .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
+                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                        ClosingBehavior.FIRE_IF_NON_EMPTY))
+            .apply("Prepare Elasticsearch Json data",
+                ParDo.of(new DoFn<String, String>() {
+                    private ObjectMapper mapper;
+
+                    @Setup 
+                    public void setup() {
+                        mapper = new ObjectMapper();
+                    }
+
+                    @ProcessElement
+                    public void processElement(ProcessContext ctx) throws Exception {
+                        // "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
+                        String[] csvData = ctx.element().split(",");
+                        Map<String, Object> jsonMap = new HashMap<>();
+                        // FIXME: hardcoded
+                        for (int i = 0; i < csvData.length; ++i) {
+                            switch(i) {
+                                case 0:
+                                    jsonMap.put("@timestamp", new Date(Long.parseLong(csvData[i])));
+                                    break;
+                                case 1:
+                                    jsonMap.put("thread_id", csvData[i]);
+                                    break;
+                                case 2:
+                                    jsonMap.put("thread_name", csvData[i]);
+                                    break;
+                                case 3:
+                                    jsonMap.put("seq", Long.valueOf(csvData[i]));
+                                    break;
+                                case 4:
+                                    jsonMap.put("dim1", csvData[i]);
+                                    break;
+                                case 5:
+                                    jsonMap.put("metrics1", Long.valueOf(csvData[i]));
+                                    break;
+                                case 6:
+                                    jsonMap.put("process_ts", new Date(Long.parseLong(csvData[i])));
+                                    break;
+                                case 7:
+                                    jsonMap.put("dim1_val", csvData[i]);
+                                    break;
+                                default:
+                            }
+                        }
+
+                        String json = mapper.writeValueAsString(jsonMap);
+                        ctx.output(json);
+                    }
+                }))
+            .apply("Append data to Elasticsearch",
+                ElasticsearchIO.append()
+                    .withConnectionConf(
+                        ElasticsearchIO.ConnectionConf.create(
+                            options.getEsHost(),
+                            options.getEsIndex())
+                                .withUsername(options.getEsUser())
+                                .withPassword(options.getEsPass()))
+                                //.withTrustSelfSignedCerts(true)) // false by default
+                    .withRetryConf(
+                        ElasticsearchIO.RetryConf.create(6, Duration.standardSeconds(60))));
+        /* END - Elasticsearch */
 
         healthData.apply("Write windowed healthy CSV files", 
             TextIO.write()

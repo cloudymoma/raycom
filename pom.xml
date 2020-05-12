@@ -21,8 +21,8 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>bindiego</groupId>
-  <artifactId>dataflow-example</artifactId>
-  <version>0.0.1</version>
+  <artifactId>raycom-dataflow-sample</artifactId>
+  <version>1.0.0</version>
 
   <packaging>jar</packaging>
 
@@ -56,6 +56,7 @@
     <json.version>20160810</json.version>
     <mysql.ver>8.0.19</mysql.ver>
     <elastic.ver>7.6.2</elastic.ver>
+    <auto-value.version>1.7.1</auto-value.version>
   </properties>
 
   <repositories>
@@ -92,6 +93,13 @@
         <configuration>
             <source>${java.version}</source>
             <target>${java.version}</target>
+            <annotationProcessorPaths>
+              <path>
+                <groupId>com.google.auto.value</groupId>
+                <artifactId>auto-value</artifactId>
+                <version>${auto-value.version}</version>
+              </path>
+            </annotationProcessorPaths>
         </configuration>
       </plugin>
 
@@ -152,6 +160,24 @@
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
               </transformers>
+              <relocations>
+                <relocation>
+                  <pattern>org.apache.http</pattern>
+                  <shadedPattern>hidden.org.apache.http</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>org.apache.logging</pattern>
+                  <shadedPattern>hidden.org.apache.logging</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>org.apache.commons.codec</pattern>
+                  <shadedPattern>hidden.org.apache.commons.codec</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>org.apache.commons.logging</pattern>
+                  <shadedPattern>hidden.org.apache.commons.logging</shadedPattern>
+                </relocation>
+              </relocations>
             </configuration>
           </execution>
         </executions>
@@ -559,6 +585,13 @@
       <groupId>org.elasticsearch.client</groupId>
       <artifactId>elasticsearch-rest-high-level-client</artifactId>
       <version>${elastic.ver}</version>
+    </dependency>
+
+    <!-- Google AutoValue -->
+    <dependency>
+      <groupId>com.google.auto.value</groupId>
+      <artifactId>auto-value-annotations</artifactId>
+      <version>${auto-value.version}</version>
     </dependency>
   </dependencies>
 </project>
