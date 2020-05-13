@@ -760,7 +760,9 @@ public class BindiegoStreaming {
                         for (int i = 0; i < csvData.length; ++i) {
                             switch(i) {
                                 case 0:
-                                    jsonMap.put("@timestamp", new Date(Long.parseLong(csvData[i])));
+                                    // jsonMap.put("@timestamp", new Date(Long.parseLong(csvData[i])));
+                                    jsonMap.put("@timestamp", 
+                                        new java.sql.Timestamp(Long.parseLong(csvData[i])));
                                     break;
                                 case 1:
                                     jsonMap.put("thread_id", csvData[i]);
@@ -778,7 +780,9 @@ public class BindiegoStreaming {
                                     jsonMap.put("metrics1", Long.valueOf(csvData[i]));
                                     break;
                                 case 6:
-                                    jsonMap.put("process_ts", new Date(Long.parseLong(csvData[i])));
+                                    // jsonMap.put("process_ts", new Date(Long.parseLong(csvData[i])));
+                                    jsonMap.put("process_ts", 
+                                        new java.sql.Timestamp(Long.parseLong(csvData[i])));
                                     break;
                                 case 7:
                                     jsonMap.put("dim1_val", csvData[i]);
