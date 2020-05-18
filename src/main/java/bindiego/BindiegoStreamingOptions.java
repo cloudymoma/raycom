@@ -39,15 +39,10 @@ public interface BindiegoStreamingOptions
     ValueProvider<String> getFilenamePrefix();
     void setFilenamePrefix(ValueProvider<String> value);
 
-    @Description("CSV File name suffix.")
-    @Default.String(".csv")
-    ValueProvider<String> getCsvFilenameSuffix();
-    void setCsvFilenameSuffix(ValueProvider<String> value);
-
-    @Description("Avro File name suffix.")
-    @Default.String(".avro")
-    ValueProvider<String> getAvroFilenameSuffix();
-    void setAvroFilenameSuffix(ValueProvider<String> value);
+    @Description("Log File name suffix.")
+    @Default.String(".log")
+    ValueProvider<String> getLogFilenameSuffix();
+    void setLogFilenameSuffix(ValueProvider<String> value);
 
     @Default.String("W-P-SS-of-NN")
     ValueProvider<String> getOutputShardTemplate();
@@ -83,25 +78,10 @@ public interface BindiegoStreamingOptions
     String getCsvDelimiter();
     void setCsvDelimiter(String value);
 
-    @Description("JSON file with BigQuery Schema description")
-    @Required
-    ValueProvider<String> getBqSchema();
-    void setBqSchema(ValueProvider<String> value);
-
-    @Description("BigQuery output table to write to")
-    @Required
-    ValueProvider<String> getBqOutputTable();
-    void setBqOutputTable(ValueProvider<String> value);
-
     @Description("GCS temp location for BigQuery")
     @Required
     ValueProvider<String> getGcsTempLocation();
     void setGcsTempLocation(ValueProvider<String> value);
-
-    @Description("Avro schema file")
-    @Required
-    ValueProvider<String> getAvroSchema();
-    void setAvroSchema(ValueProvider<String> value);
 
     @Description("PubsubMessage ID attribute.")
     @Default.String("id")
@@ -112,41 +92,6 @@ public interface BindiegoStreamingOptions
     @Default.String("timestamp")
     String getMessageTsAttr();
     void setMessageTsAttr(String value);
-
-    @Description("Bigtable Instance Id")
-    @Required
-    String getBtInstanceId();
-    void setBtInstanceId(String value);
-
-    @Description("Bigtable Table Id to write realtime data to, tall table")
-    @Required
-    String getBtTableIdTall();
-    void setBtTableIdTall(String value);
-
-    @Description("Bigtable Table Id to write realtime data to, wide table")
-    @Required
-    String getBtTableIdWide();
-    void setBtTableIdWide(String value);
-
-    @Description("JDBC class")
-    @Required
-    String getJdbcClass();
-    void setJdbcClass(String value);
-
-    @Description("JDBC connection string")
-    @Required
-    String getJdbcConn();
-    void setJdbcConn(String value);
-
-    @Description("JDBC connections username")
-    @Required
-    String getJdbcUsername();
-    void setJdbcUsername(String value);
-
-    @Description("JDBC connection password")
-    @Required
-    String getJdbcPassword();
-    void setJdbcPassword(String value);
 
     @Description("Elasticsearch host, usually a LB for coordinating nodes. e.g. https://es.ingest.abc.com")
     @Required
