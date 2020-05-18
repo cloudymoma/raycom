@@ -4,7 +4,8 @@
     ],
     "settings": {
         "number_of_shards": 2,
-        "number_of_replicas": 1
+        "number_of_replicas": 1,
+        "final_pipeline": "gclb"
     },
     "mappings": {
         "properties": {

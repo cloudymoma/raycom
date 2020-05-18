@@ -46,6 +46,7 @@ Same as GCP, there is a script can get the job done. Simply run `cd scripts/elas
 
 This script will
 
+- Create an index pipeline for GCLB logs, mainly for adding Geo information and parsing User Agent field
 - Create an index template in Elasticsearch, so if the index name starts with `gclb*` it will use the schema & settings defined [here](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/index-gclb-template.json)
 - Create an index called `gclb-000001` and a writing alias associate with it named `gclb-ingest`
 - Create an index rolling policy for the created alias, hence the dataflow only write to the fixed index name with more indices been created `gclb-000002`, `gclb-000003` ... etc. etc. underneath. The policy has been defined [here](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/init.sh#L47), you could update that according to your scenario. The default rolling policy is either the index is 30-day old or hit 1 million docs or 5GB in size will create a new one.

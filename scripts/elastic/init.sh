@@ -7,6 +7,15 @@ kbn_host=https://k8na.bindiego.com
 es_user=elastic
 es_pass=changeme
 
+# Create an ES pipeline for GCLB logs
+__create_index_pipeline() {
+    curl -X PUT \
+        -u "elastic:${es_pass}" \
+        "${es_client}/_ingest/pipeline/gclb" \
+        -H "Content-Type: application/json" \
+        -d "@${pwd}/index-gclb-pipeline.json"
+}
+
 # create an ES template
 __create_index_template() {
     curl -X PUT \
@@ -47,6 +56,7 @@ __create_index_pattern() {
         -d '{"attributes":{"title":"gclb*","timeFieldName":"@timestamp","fields":"[]"}}'
 }
 
+__create_index_pipeline
 __create_index_template
 __create_index_and_setup
 __create_index_pattern

@@ -1,0 +1,17 @@
+{
+    "description": "Google Cloud Load Balancer logs",
+    "processors": [
+      {
+        "user_agent" : {
+          "field" : "httpRequest.userAgent",
+          "target_field" : "httpRequest.user_agent"
+        }
+      },
+      {
+        "geoip" : {
+          "field" : "httpRequest.remoteIp",
+          "target_field" : "httpRequest.geo"
+        }
+      }
+    ]
+  }
