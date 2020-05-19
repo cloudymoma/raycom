@@ -62,3 +62,9 @@ make df
 ```
 
 #### Dashboards in Kibana
+
+You could have much more beyond the below examples in Kibana
+
+![](https://raw.githubusercontent.com/cloudymoma/raycom/gcp-lb-log/miscs/gclb-dash1.png)
+
+![](https://raw.githubusercontent.com/cloudymoma/raycom/gcp-lb-log/miscs/gclb-dash2.png)
