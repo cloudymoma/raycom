@@ -67,7 +67,7 @@ Double check the paramters passed to the job trigger in `makefile`, then,
 make df
 ```
 
-##### Why exclude url contains **ingest**
+##### Why exclude url contains the *ingest* keyword
 
 First of all, we could do it when create a the [sink](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/gcp_setup.sh#L16-L17). Or in the Elasticsearch [pipeline](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/index-gclb-pipeline.json#L4-L8). It's highly recommended to do it at the sink. That would be more efficient. We only demonstrate how to use that *drop* processor here in the code in case you may need for other purposes.
 
