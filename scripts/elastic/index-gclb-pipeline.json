@@ -2,6 +2,11 @@
     "description": "Google Cloud Load Balancer logs",
     "processors": [
       {
+        "drop" : {
+          "if": "ctx['httpRequest']['requestDomain'].contains('ingest')"
+        }
+      },
+      {
         "user_agent" : {
           "field" : "httpRequest.userAgent",
           "target_field" : "httpRequest.user_agent"
