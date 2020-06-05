@@ -1,6 +1,6 @@
 ## Google Cloud Load Balancer logs in Elasticsearch
 
-[![Build Status](https://jenkins.bindiego.com/buildStatus/icon?job=raycom-streaming)](https://jenkins.bindiego.com/job/raycom-streaming/)
+[![Build Status](https://jenkins.bindiego.com/buildStatus/icon?job=raycom-gclb-log)](https://jenkins.bindiego.com/job/raycom-gclb-log/)
 
 You can use this master branch as a skeleton java project
 
@@ -66,6 +66,14 @@ Double check the paramters passed to the job trigger in `makefile`, then,
 ```
 make df
 ```
+
+##### Why exclude url contains **ingest**
+
+First of all, we could do it when create a the [sink](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/gcp_setup.sh#L16-L17). Or in the Elasticsearch [pipeline](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/index-gclb-pipeline.json#L4-L8). It's highly recommended to do it at the sink. That would be more efficient. We only demonstrate how to use that *drop* processor here in the code in case you may need for other purposes.
+
+The reason we drop that is to prevent a dead loop. We have configured our Elastic Stack behind the Google Cloud Load Balancer which all have the keyword *ingest* for Elasticsearch ingest nodes. So the accessing logs will be processed by the logging pipeline as an infinite loop. Imagine: POST data to ingest nodes -> GCLB produce logs -> ingest logs over and over again. 
+
+So you may or may not need this, please adjust accordingly to your environment.
 
 #### Dashboards in Kibana
 
