@@ -797,6 +797,8 @@ public class BindiegoStreaming {
                 }))
             .apply("Append data to Elasticsearch",
                 ElasticsearchIO.append()
+                    .withMaxBatchSize(options.getEsMaxBatchSize())
+                    .withMaxBatchSizeBytes(options.getEsMaxBatchBytes())
                     .withConnectionConf(
                         ElasticsearchIO.ConnectionConf.create(
                             options.getEsHost(),
