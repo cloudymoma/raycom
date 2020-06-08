@@ -112,4 +112,14 @@ public interface BindiegoStreamingOptions
     @Required
     String getEsIndex();
     void setEsIndex(String value);
+
+    @Description("Elasticsearch Rest client max batch size")
+    @Default.Long(1000L)
+    Long getEsMaxBatchSize();
+    void setEsMaxBatchSize(Long value);
+
+    @Description("Elasticsearch Rest client max batch bytes")
+    @Default.Long(5L * 1024L * 1024L)
+    Long getEsMaxBatchBytes();
+    void setEsMaxBatchBytes(Long value);
 }

@@ -7,6 +7,8 @@ eshost := https://k8es.ingest.bindiego.com
 esuser := elastic
 espass := changeme
 esindex := gclb-ingest
+esBatchSize := 2000
+esBatchBytes := 10485760
 
 dfup:
 	@mvn -Pdataflow-runner compile exec:java \
@@ -38,6 +40,8 @@ dfup:
         --esUser=$(esuser) \
         --esPass=$(espass) \
         --esIndex=$(esindex) \
+        --esMaxBatchSize=$(esBatchSize) \
+        --esMaxBatchBytes=$(esBatchBytes) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --update \
@@ -73,6 +77,8 @@ df:
         --esUser=$(esuser) \
         --esPass=$(espass) \
         --esIndex=$(esindex) \
+        --esMaxBatchSize=$(esBatchSize) \
+        --esMaxBatchBytes=$(esBatchBytes) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region)"
