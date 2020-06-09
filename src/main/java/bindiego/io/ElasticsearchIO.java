@@ -8,6 +8,8 @@ import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClientBuilder;
 import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.client.ResponseListener;
+import org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback;
 
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
@@ -23,6 +25,9 @@ import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.nio.conn.ssl.SSLIOSessionStrategy;
 import org.apache.http.nio.entity.NStringEntity;
 import org.apache.http.ssl.SSLContexts;
+import org.apache.http.impl.nio.reactor.IOReactorConfig;
+import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
+
 
 import com.google.auto.value.AutoValue;
 import javax.annotation.Nonnull;
@@ -121,6 +126,9 @@ public class ElasticsearchIO {
 
         public abstract String getIndex();
 
+        @Nullable
+        public abstract Integer getNumThread();
+
         abstract Builder builder();
 
         @AutoValue.Builder
@@ -139,6 +147,8 @@ public class ElasticsearchIO {
             abstract Builder setTrustSelfSignedCerts(boolean trustSelfSignedCerts);
 
             abstract Builder setIndex(String index);
+
+            abstract Builder setNumThread(Integer numThread);
       
             abstract ConnectionConf build();
         }
@@ -183,6 +193,13 @@ public class ElasticsearchIO {
             return builder().setConnectTimeout(connectTimeout).build();
         }
 
+        public ConnectionConf withNumThread(Integer numThread) {
+            checkArgument(null != numThread, "numThread cannot be null");
+            return builder().setNumThread(
+                numThread <= 1 ? new Integer(1) : numThread
+            ).build();
+        }
+
         private RestClientBuilder createClientBuilder() throws IOException {
             /*
             HttpHost[] esHosts = new HttpHost[getAddresses().size()];
@@ -199,13 +216,36 @@ public class ElasticsearchIO {
 
             RestClientBuilder restClientBuilder = RestClient.builder(esHosts);
 
-            if (null != getUsername()) {
+            if (null != getUsername() || null != getNumThread()) {
                 final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-                credentialsProvider.setCredentials(
-                    AuthScope.ANY, new UsernamePasswordCredentials(getUsername(), getPassword()));
+                if (null != getUsername()) 
+                    credentialsProvider.setCredentials(
+                        AuthScope.ANY, new UsernamePasswordCredentials(getUsername(), getPassword()));
+                /*    
                 restClientBuilder.setHttpClientConfigCallback(
                     httpAsyncClientBuilder ->
                         httpAsyncClientBuilder.setDefaultCredentialsProvider(credentialsProvider));
+                */
+                restClientBuilder.setHttpClientConfigCallback(
+                    new HttpClientConfigCallback() {
+                        @Override
+                        public HttpAsyncClientBuilder customizeHttpClient(
+                            HttpAsyncClientBuilder httpAsyncClientBuilder) {
+                                if (null != getUsername()) {
+                                    httpAsyncClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
+                                }
+
+                                if (null != getNumThread()) {
+                                    httpAsyncClientBuilder.setDefaultIOReactorConfig(
+                                        IOReactorConfig.custom()
+                                            .setIoThreadCount(getNumThread().intValue())
+                                            .build());
+                                }
+
+                                return httpAsyncClientBuilder;
+                            }
+                    }
+                );
             }
 
             restClientBuilder.setRequestConfigCallback(
@@ -516,12 +556,33 @@ public class ElasticsearchIO {
                 request.addParameters(Collections.emptyMap());
                 request.setEntity(requestBody);
 
+                // Sync
                 Response response = restClient.performRequest(request);
                 HttpEntity responseEntity = new BufferedHttpEntity(response.getEntity());
                 if (null != spec.getRetryConf() 
                         && spec.getRetryConf().getRetryPredicate().test(responseEntity)) {
                     responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
                 }
+
+                // Async
+                /*
+                restClient.performRequestAsync(request, new ResponseListener() {
+                    @Override
+                    public void onSuccess(Response response) {
+                        try {
+                            HttpEntity responseEntity = new BufferedHttpEntity(response.getEntity());
+                            if (null != spec.getRetryConf() 
+                                    && spec.getRetryConf().getRetryPredicate().test(responseEntity)) {
+                                responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
+                            }
+                        } catch (Exception ex) {}
+                    }
+
+                    @Override
+                    public void onFailure(Exception ex) {
+                    }
+                });
+                */
             }
 
             private HttpEntity handleRetry(
