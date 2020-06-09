@@ -122,4 +122,9 @@ public interface BindiegoStreamingOptions
     @Default.Long(5L * 1024L * 1024L)
     Long getEsMaxBatchBytes();
     void setEsMaxBatchBytes(Long value);
+
+    @Description("Elasticsearch Rest client threads")
+    @Default.Integer(1)
+    Integer getEsNumThread();
+    void setEsNumThread(Integer value);
 }

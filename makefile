@@ -9,6 +9,7 @@ espass := changeme
 esindex := gclb-ingest
 esBatchSize := 2000
 esBatchBytes := 10485760
+esNumThread := 2
 
 dfup:
 	@mvn -Pdataflow-runner compile exec:java \
@@ -42,6 +43,7 @@ dfup:
         --esIndex=$(esindex) \
         --esMaxBatchSize=$(esBatchSize) \
         --esMaxBatchBytes=$(esBatchBytes) \
+        --esNumThread=$(esNumThread) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --update \
@@ -79,6 +81,7 @@ df:
         --esIndex=$(esindex) \
         --esMaxBatchSize=$(esBatchSize) \
         --esMaxBatchBytes=$(esBatchBytes) \
+        --esNumThread=$(esNumThread) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region)"
