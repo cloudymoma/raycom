@@ -557,15 +557,16 @@ public class ElasticsearchIO {
                 request.setEntity(requestBody);
 
                 // Sync
+                /*
                 Response response = restClient.performRequest(request);
                 HttpEntity responseEntity = new BufferedHttpEntity(response.getEntity());
                 if (null != spec.getRetryConf() 
                         && spec.getRetryConf().getRetryPredicate().test(responseEntity)) {
                     responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
                 }
+                */
 
                 // Async
-                /*
                 restClient.performRequestAsync(request, new ResponseListener() {
                     @Override
                     public void onSuccess(Response response) {
@@ -578,11 +579,10 @@ public class ElasticsearchIO {
                         } catch (Exception ex) {}
                     }
 
-                    @Override
+                    @Override // TODO: error handling. e.g. republish to message queue or write GCS etc.
                     public void onFailure(Exception ex) {
                     }
                 });
-                */
             }
 
             private HttpEntity handleRetry(
