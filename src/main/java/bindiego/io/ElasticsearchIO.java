@@ -581,6 +581,7 @@ public class ElasticsearchIO {
 
                     @Override // TODO: error handling. e.g. republish to message queue or write GCS etc.
                     public void onFailure(Exception ex) {
+                        logger.error("Elasticsearch ingest failed", ex);
                     }
                 });
             }
