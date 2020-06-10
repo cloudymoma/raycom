@@ -580,6 +580,7 @@ public class ElasticsearchIO {
 
                     @Override
                     public void onFailure(Exception ex) {
+                        logger.error("Elasticsearch ingest failed", ex);
                     }
                 });
                 */
