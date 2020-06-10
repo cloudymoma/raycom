@@ -557,15 +557,16 @@ public class ElasticsearchIO {
                 request.setEntity(requestBody);
 
                 // Sync
+                /*
                 Response response = restClient.performRequest(request);
                 HttpEntity responseEntity = new BufferedHttpEntity(response.getEntity());
                 if (null != spec.getRetryConf() 
                         && spec.getRetryConf().getRetryPredicate().test(responseEntity)) {
                     responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
                 }
+                */
 
                 // Async
-                /*
                 restClient.performRequestAsync(request, new ResponseListener() {
                     @Override
                     public void onSuccess(Response response) {
@@ -583,7 +584,6 @@ public class ElasticsearchIO {
                         logger.error("Elasticsearch ingest failed", ex);
                     }
                 });
-                */
             }
 
             private HttpEntity handleRetry(
