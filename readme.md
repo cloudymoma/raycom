@@ -119,8 +119,8 @@ POST /_aliases
         "alias": "raycom-dataflow-ingest"
       },
       "add": {
-        "index": "raycom-dataflow",
-        "alias": "raycom-dataflow-ingest-new"
+        "index": "raycom-dataflow-new",
+        "alias": "raycom-dataflow-ingest"
       }
     }
   ]
