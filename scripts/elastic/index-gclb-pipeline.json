@@ -9,13 +9,15 @@
       {
         "user_agent" : {
           "field" : "httpRequest.userAgent",
-          "target_field" : "httpRequest.user_agent"
+          "target_field" : "httpRequest.user_agent",
+          "ignore_missing": true
         }
       },
       {
         "geoip" : {
           "field" : "httpRequest.remoteIp",
-          "target_field" : "httpRequest.geo"
+          "target_field" : "httpRequest.geo",
+          "ignore_missing": true
         }
       }
     ]
