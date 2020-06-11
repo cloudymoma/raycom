@@ -177,6 +177,7 @@ public class BindiegoStreaming {
 
         /* Elasticsearch */
         processedData.get(STR_OUT)
+        /*
             .apply(options.getWindowSize() + " window for healthy data",
                 Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
                     .triggering(
@@ -192,6 +193,7 @@ public class BindiegoStreaming {
                     .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
                     .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
                         ClosingBehavior.FIRE_IF_NON_EMPTY))
+        */
             .apply("Append data to Elasticsearch",
                 ElasticsearchIO.append()
                     .withMaxBatchSize(options.getEsMaxBatchSize())
