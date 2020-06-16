@@ -77,6 +77,8 @@ So you may or may not need this, please adjust accordingly to your environment.
 
 #### Dashboards in Kibana
 
+Import from [this](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/gclb_dashboard.ndjson) example
+
 You could have much more beyond the below examples in Kibana
 
 ![](https://raw.githubusercontent.com/cloudymoma/raycom/gcp-lb-log/miscs/gclb-dash1.png)
