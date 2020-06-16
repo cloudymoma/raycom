@@ -6,7 +6,9 @@
     "settings": {
         "number_of_shards": 2,
         "number_of_replicas": 1,
-        "final_pipeline": "gclb"
+        "final_pipeline": "gclb",
+        "index.lifecycle.name": "gclb-policy",
+        "index.lifecycle.rollover_alias": "gclb-ingest"
     },
     "mappings": {
         "properties": {

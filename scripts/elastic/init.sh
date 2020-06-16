@@ -27,10 +27,17 @@ __create_index_template() {
     # veryfy
     curl -X GET \
         -u "elastic:${es_pass}" \
-        "${es_client}/_template/gclb"#
+        "${es_client}/_template/gclb"
 }
 
 __create_index_and_setup() {
+    # create a lifecycle pocily, edit the json data file according to your needs
+    curl -X PUT \
+        -u "elastic:${es_pass}" \
+        "${es_client}/_ilm/policy/gclb-policy" \
+        -H "Content-Type: application/json" \
+        -d "@${pwd}/index-gclb-policy.json"
+
     # create an index and assign an alias for writing
     curl -X PUT \
         -u "elastic:${es_pass}" \
@@ -38,12 +45,10 @@ __create_index_and_setup() {
         -H "Content-Type: application/json" \
         -d '{"aliases": {"gclb-ingest": { "is_write_index": true }}}'
 
-    # setup the writing alias rollup policy
-    curl -X POST \
+    # veryfy
+    curl -X GET \
         -u "elastic:${es_pass}" \
-        "${es_client}/gclb-ingest/_rollover" \
-        -H "Content-Type: application/json" \
-        -d '{"conditions": {"max_age": "30d", "max_docs": 1000000, "max_size": "5gb"}}'
+        "${es_client}/gclb*/_ilm/explain"
 }
 
 # create a Kibana index pattern
