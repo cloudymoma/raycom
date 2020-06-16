@@ -127,22 +127,52 @@ POST /_aliases
 }
 ```
 
-- (Optional) Alternatively, you could setup [index rollover](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-rollover-index.html)
+- (Optional) Alternatively, you could setup [index lifecycle](https://www.elastic.co/guide/en/elasticsearch/reference/current/getting-started-index-lifecycle-management.html)
 
 ```
-PUT raydom-dataflow-000001
+PUT _ilm/policy/raycom_policy
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_size": "20GB",
+            "max_docs": 20000000,
+            "max_age": "7d"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "30d",
+        "actions": {
+          "delete": {}
+        }
+      }
+    }
+  }
+}
+```
+
+You will need to update the index [template](https://github.com/cloudymoma/raycom/blob/streaming/scripts/elastic/index-raycom-template.json)
+
+```
+...
+"index_patterns": ["datastream-*"],                 
+"settings": {
+  "number_of_shards": 1,
+  "number_of_replicas": 1,
+  "index.lifecycle.name": "raycom_policy",      
+  "index.lifecycle.rollover_alias": "raycom-dataflow-ingest"    
+}
+...
+```
+
+```
+PUT raycom-dataflow-000001
 {
   "aliases": {
     "raycom-dataflow-ingest": { "is_write_index": true } 
-  }
-}
-
-POST /raycom-dataflow-ingest/_rollover 
-{
-  "conditions": {
-    "max_age":   "7d",
-    "max_docs":  1000000,
-    "max_size":  "5gb"
   }
 }
 ```
