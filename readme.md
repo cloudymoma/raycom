@@ -158,7 +158,7 @@ You will need to update the index [template](https://github.com/cloudymoma/rayco
 
 ```
 ...
-"index_patterns": ["datastream-*"],                 
+"index_patterns": ["raycom*"],                 
 "settings": {
   "number_of_shards": 1,
   "number_of_replicas": 1,
