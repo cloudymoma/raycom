@@ -88,3 +88,5 @@ You could have much more beyond the below examples in Kibana
 ![](https://raw.githubusercontent.com/cloudymoma/raycom/gcp-lb-log/miscs/gclb-dash3.png)
 
 ![](https://raw.githubusercontent.com/cloudymoma/raycom/gcp-lb-log/miscs/gclb-dash4.png)
+
+![](https://raw.githubusercontent.com/cloudymoma/raycom/gcp-lb-log/miscs/gclb-dash5.png)
