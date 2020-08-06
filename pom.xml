@@ -31,7 +31,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-    <beam.version>2.22.0</beam.version>
+    <beam.version>2.23.0</beam.version>
 
     <bigquery.version>v2-rev20191211-1.30.9</bigquery.version>
     <bigtable.ver>1.14.0</bigtable.ver>
