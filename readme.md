@@ -8,6 +8,10 @@ master分支可以用来当作一个骨架项目
 
 beam代码理论上可以驱动spark，flink等等流式框架，详情参考[这里](https://beam.apache.org/documentation/runners/capability-matrix/)
 
+### Overall Streaming System Architecture
+
+![](https://raw.githubusercontent.com/cloudymoma/raycom/streaming/miscs/streaming_gcp.png)
+
 ### Proposed streaming pipeline
 
 #### IMPORTANT: in the sample code, assume the pubsub message is csv text encoded in utf-8
