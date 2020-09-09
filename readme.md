@@ -205,6 +205,8 @@ The purpose of this project is only to show you how to quickly run a streaming p
 
 这里的代码示例主要为了说明beam的工作原理（触发器、窗口、水印等等）和一般实时+线下adhoc数据分析的一个大体框架。虽然Dataflow引擎可以动态伸缩，如果其他不能动态伸缩的引擎，就更需要把这个大的DAG拆分成一些小的管道，使用发布/订阅引擎作为数据交换媒介。这样维护起来比较清晰，更能提高计算资源的利用率，还在出错的时候相对快的恢复（暴力重跑啥的）。当然，数据处理的效率还有很多优化空间，大家要根据具体场景去做，因为没有唯一标准答案，也就不在这里下功夫了。
 
+[Triggers explained 触发器解释](https://gist.github.com/bindiego/3814cfbd3b8d47216fe74686b0ae4339)
+
 #### FAQ
 1. Do I need to setup the BigQuery table in advance?
 
