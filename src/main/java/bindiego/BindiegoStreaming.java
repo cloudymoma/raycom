@@ -138,6 +138,11 @@ public class BindiegoStreaming {
                 ((ObjectNode) jsonRoot.get("httpRequest")).put("requestDomain", url.getHost());
                 ((ObjectNode) jsonRoot.get("httpRequest")).put("requestProtocol", url.getProtocol());
 
+                String latency = new String(jsonRoot.get("httpRequest").get("latency").asText());
+                ((ObjectNode) jsonRoot.get("httpRequest"))
+                    .put("backendLatency", 
+                        Double.valueOf(latency.substring(0, latency.length())));
+
                 r.get(STR_OUT).output(mapper.writeValueAsString(json));
 
                 // use this only if the element doesn't have an event timestamp attached to it

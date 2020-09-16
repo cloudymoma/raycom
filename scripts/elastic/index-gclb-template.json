@@ -17,6 +17,9 @@
             },
             "httpRequest": {
                 "properties": {
+                    "backendLatency" : {
+                        "type": "double"
+                    },
                     "cacheFillBytes": {
                         "type": "integer"
                     },
