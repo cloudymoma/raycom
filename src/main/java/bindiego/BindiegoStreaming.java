@@ -141,7 +141,7 @@ public class BindiegoStreaming {
                 String latency = new String(jsonRoot.get("httpRequest").get("latency").asText());
                 ((ObjectNode) jsonRoot.get("httpRequest"))
                     .put("backendLatency", 
-                        Double.valueOf(latency.substring(0, latency.length())));
+                        Double.valueOf(latency.substring(0, latency.length() - 1)));
 
                 r.get(STR_OUT).output(mapper.writeValueAsString(json));
 
