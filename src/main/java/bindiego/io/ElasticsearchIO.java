@@ -27,11 +27,16 @@ import org.apache.http.nio.entity.NStringEntity;
 import org.apache.http.ssl.SSLContexts;
 import org.apache.http.impl.nio.reactor.IOReactorConfig;
 import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
-
+import org.apache.http.ssl.SSLContextBuilder;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
 
 import com.google.auto.value.AutoValue;
+
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -51,6 +56,9 @@ import java.util.ListIterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.function.Predicate;
+import java.security.cert.X509Certificate;
+import java.security.NoSuchAlgorithmException;
+import java.security.KeyManagementException;
 
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
@@ -129,6 +137,14 @@ public class ElasticsearchIO {
         @Nullable
         public abstract Integer getNumThread();
 
+        @Nullable 
+        public abstract String getKeystorePath();
+
+        @Nullable 
+        public abstract String getKeystorePassword();
+
+        public abstract boolean isIgnoreInsecureSSL();
+
         abstract Builder builder();
 
         @AutoValue.Builder
@@ -149,6 +165,12 @@ public class ElasticsearchIO {
             abstract Builder setIndex(String index);
 
             abstract Builder setNumThread(Integer numThread);
+
+            abstract Builder setKeystorePath(String keystorePath);
+
+            abstract Builder setKeystorePassword(String password);
+
+            abstract Builder setIgnoreInsecureSSL(boolean ignoreInsecureSSL);
       
             abstract ConnectionConf build();
         }
@@ -164,6 +186,7 @@ public class ElasticsearchIO {
                 .setAddress(address)
                 .setIndex(index)
                 .setTrustSelfSignedCerts(false)
+                .setIgnoreInsecureSSL(false)
                 .build();
         }
 
@@ -198,6 +221,10 @@ public class ElasticsearchIO {
             return builder().setNumThread(
                 numThread <= 1 ? new Integer(1) : numThread
             ).build();
+        }
+
+        public ConnectionConf withIngnoreInsecureSSL(boolean ignoreInsecureSSL) {
+            return builder().setIgnoreInsecureSSL(ignoreInsecureSSL).build();
         }
 
         private RestClientBuilder createClientBuilder() throws IOException {
@@ -242,10 +269,56 @@ public class ElasticsearchIO {
                                             .build());
                                 }
 
+                                if (isIgnoreInsecureSSL()) {
+                                    try {
+                                        // SSLContext context = SSLContext.getInstance("SSL");
+                                        SSLContext context = SSLContext.getInstance("TLS");
+                    
+                                        context.init(null, new TrustManager[] {
+                                            new X509TrustManager() {
+                                                public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                    
+                                                public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                    
+                                                public X509Certificate[] getAcceptedIssuers() { return null; }
+                                            }
+                                        }, null);
+
+                                        httpAsyncClientBuilder.setSSLContext(context)
+                                            .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
+                                    } catch (NoSuchAlgorithmException ex) {
+                                        logger.error("Error when setup dummy SSLContext", ex);
+                                    } catch (KeyManagementException ex) {
+                                        logger.error("Error when setup dummy SSLContext", ex);
+                                    } catch (Exception ex) {
+                                        logger.error("Error when setup dummy SSLContext", ex);
+                                    }
+                                }
+
                                 return httpAsyncClientBuilder;
                             }
                     }
                 );
+            }
+
+            if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
+                try {
+                    KeyStore keyStore = KeyStore.getInstance("jks");
+                    try (InputStream is = new FileInputStream(new File(getKeystorePath()))) {
+                        String keystorePassword = getKeystorePassword();
+                        keyStore.load(is, (keystorePassword == null) ? null : keystorePassword.toCharArray());
+                    }
+                    final TrustStrategy trustStrategy =
+                        isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
+                    final SSLContext sslContext =
+                        SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
+                    final SSLIOSessionStrategy sessionStrategy = new SSLIOSessionStrategy(sslContext);
+                    restClientBuilder.setHttpClientConfigCallback(
+                        httpClientBuilder ->
+                            httpClientBuilder.setSSLContext(sslContext).setSSLStrategy(sessionStrategy));
+                } catch (Exception e) {
+                    throw new IOException("Can't load the client certificate from the keystore", e);
+                }
             }
 
             restClientBuilder.setRequestConfigCallback(
