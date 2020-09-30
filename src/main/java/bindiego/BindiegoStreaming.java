@@ -134,14 +134,17 @@ public class BindiegoStreaming {
                 jsonRoot.put("@timestamp", jsonRoot.get("timestamp").asText());
                 jsonRoot.remove("timestamp");
 
+                // Extract host & protocol from URL
                 URL url = new URL(jsonRoot.get("httpRequest").get("requestUrl").asText());
                 ((ObjectNode) jsonRoot.get("httpRequest")).put("requestDomain", url.getHost());
                 ((ObjectNode) jsonRoot.get("httpRequest")).put("requestProtocol", url.getProtocol());
 
+                // Extract the backend latency, latency between GFE_layer1 and origin
                 String latency = new String(jsonRoot.get("httpRequest").get("latency").asText());
                 ((ObjectNode) jsonRoot.get("httpRequest"))
                     .put("backendLatency", 
                         Double.valueOf(latency.substring(0, latency.length() - 1)));
+                ((ObjectNode) jsonRoot.get("httpRequest")).remove("latency");
 
                 r.get(STR_OUT).output(mapper.writeValueAsString(json));
 
