@@ -17,7 +17,16 @@
             },
             "httpRequest": {
                 "properties": {
+                    "frontendSrtt" : {
+                        "type": "double"
+                    },
+                    "gfeLatency" : {
+                        "type": "double"
+                    },
                     "backendLatency" : {
+                        "type": "double"
+                    },
+                    "backendLatency2" : {
                         "type": "double"
                     },
                     "cacheFillBytes": {
@@ -32,8 +41,21 @@
                     "cacheValidatedWithOriginServer": {
                         "type": "boolean"
                     },
+                    "resourceType": {
+                        "type": "keyword",
+                        "ignore_above": 16
+                    },
                     "remoteIp": {
                         "type": "ip",
+                        "fields": {
+                            "keyword": {
+                                "type": "keyword",
+                                "ignore_above": 256
+                            }
+                        }
+                    },
+                    "remoteIpASN": {
+                        "type": "text",
                         "fields": {
                             "keyword": {
                                 "type": "keyword",
@@ -276,6 +298,17 @@
                                 "ignore_above": 256
                             }
                         }
+                    },
+                    "cacheIdCityCode": {
+                        "type": "keyword",
+                        "ignore_above": 16
+                    },
+                    "cacheLocation": {
+                        "type": "geo_point"
+                    },
+                    "gclbRegion": {
+                        "type": "keyword",
+                        "ignore_above": 16
                     },
                     "statusDetails": {
                         "type": "text",

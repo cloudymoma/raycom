@@ -88,6 +88,8 @@ import org.joda.time.Duration;
 import org.joda.time.Instant;
 // import org.codehaus.jackson.map.ObjectMapper;
 
+import org.apache.commons.io.FilenameUtils;
+
 import bindiego.io.WindowedFilenamePolicy;
 import bindiego.utils.DurationUtils;
 import bindiego.utils.SchemaParser;
@@ -130,7 +132,7 @@ public class BindiegoStreaming {
                 JsonNode json = mapper.readTree(payload);
                 ObjectNode jsonRoot = (ObjectNode) json;
 
-                //Optional: add timestamp in Elasticsearch's native tongue
+                // Optional: add timestamp in Elasticsearch's native tongue
                 jsonRoot.put("@timestamp", jsonRoot.get("timestamp").asText());
                 jsonRoot.remove("timestamp");
 
@@ -139,12 +141,59 @@ public class BindiegoStreaming {
                 ((ObjectNode) jsonRoot.get("httpRequest")).put("requestDomain", url.getHost());
                 ((ObjectNode) jsonRoot.get("httpRequest")).put("requestProtocol", url.getProtocol());
 
+                // REVISIT: quick impl, not ideal but works
+                // Extract resource type from URL, e.g. .txt .m4s, .m3u8, .ts, .tar.gz, .js, .html etc.
+                int cutoffLength = 6;
+                String urlStr = jsonRoot.get("httpRequest").get("requestUrl").asText();
+                int urlLength = urlStr.length();
+                if (cutoffLength < urlLength) {
+                    String partialUrl = urlStr.substring(urlLength - cutoffLength);
+
+                    if (partialUrl.contains(".")) {
+                        ((ObjectNode) jsonRoot.get("httpRequest"))
+                            .put("resourceType", FilenameUtils.getExtension(partialUrl));
+                    }
+                }
+
                 // Extract the backend latency, latency between GFE_layer1 and origin
                 String latency = new String(jsonRoot.get("httpRequest").get("latency").asText());
+                Double backendLatency = Double.valueOf(latency.substring(0, latency.length() - 1));
                 ((ObjectNode) jsonRoot.get("httpRequest"))
-                    .put("backendLatency", 
-                        Double.valueOf(latency.substring(0, latency.length() - 1)));
+                    .put("backendLatency", backendLatency);
                 ((ObjectNode) jsonRoot.get("httpRequest")).remove("latency");
+
+                // backednLatency2, latency between GFE_layer2 and origin
+                Double backendLatency2 = null;
+                if (null != jsonRoot.get("jsonPayload").get("backendLatency")) {
+                    String latency2 = new String(jsonRoot.get("jsonPayload").get("backendLatency").asText());
+                    backendLatency2 = Double.valueOf(latency2.substring(0, latency2.length() - 1));
+                    ((ObjectNode) jsonRoot.get("httpRequest"))
+                        .put("backendLatency2", backendLatency2);
+                    ((ObjectNode) jsonRoot.get("jsonPayload")).remove("backendLatency");
+
+                    // calculate latency between GFE_layer1 and GFE_layer2
+                    ((ObjectNode) jsonRoot.get("httpRequest"))
+                        .put("gfeLatency", (backendLatency - backendLatency2));
+                }
+
+                // Frontend SRTT, latency between client and GFE_layer1
+                Double feSrtt = null;
+                if (null != jsonRoot.get("jsonPayload").get("frontendSrtt")) {
+                    String feSrttStr = new String(jsonRoot.get("jsonPayload").get("frontendSrtt").asText());
+                    feSrtt = Double.valueOf(feSrttStr.substring(0, feSrttStr.length() - 1));
+                    ((ObjectNode) jsonRoot.get("httpRequest"))
+                        .put("frontendSrtt", feSrtt);
+                    ((ObjectNode) jsonRoot.get("jsonPayload")).remove("frontendSrtt");
+                }
+
+                // Get CachedID / Pop location ISO3166-1 3-letter city code
+                if (null != jsonRoot.get("jsonPayload").get("cacheId")) {
+                    // REVISIT: test string length
+                    String cachedIdCityCode = new String(jsonRoot.get("jsonPayload").get("cacheId").asText())
+                        .substring(0, 3);
+                    ((ObjectNode) jsonRoot.get("jsonPayload"))
+                        .put("cacheIdCityCode", cachedIdCityCode);
+                }
 
                 r.get(STR_OUT).output(mapper.writeValueAsString(json));
 

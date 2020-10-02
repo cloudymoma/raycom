@@ -75,6 +75,10 @@ The reason we drop that is to prevent a dead loop. We have configured our Elasti
 
 So you may or may not need this, please adjust accordingly to your environment.
 
+#### GCLB Logging data explained
+
+First thing first, all latency values, such as `httpRequest.backendLatency` and `httpRequest.frontendSrtt` etc. are all presented in `seconds`. We have turned into `ms` in Kibana dashboard by using `TSVB` widgets :)
+
 #### Dashboards in Kibana
 
 Import from [this](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/gclb_dashboard.ndjson) example
