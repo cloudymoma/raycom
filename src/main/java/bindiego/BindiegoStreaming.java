@@ -156,11 +156,20 @@ public class BindiegoStreaming {
                 }
 
                 // Extract the backend latency, latency between GFE_layer1 and origin
-                String latency = new String(jsonRoot.get("httpRequest").get("latency").asText());
-                Double backendLatency = Double.valueOf(latency.substring(0, latency.length() - 1));
-                ((ObjectNode) jsonRoot.get("httpRequest"))
-                    .put("backendLatency", backendLatency);
-                ((ObjectNode) jsonRoot.get("httpRequest")).remove("latency");
+                String latency = null;
+                Double backendLatency = null;
+                if (null != jsonRoot.get("httpRequest").get("latency")) {
+                    latency = jsonRoot.get("httpRequest").get("latency").asText();
+                    ((ObjectNode) jsonRoot.get("httpRequest")).remove("latency");
+                } else if (null != jsonRoot.get("jsonPayload").get("latencySeconds")) {
+                    latency = jsonRoot.get("jsonPayload").get("latencySeconds").asText();
+                    ((ObjectNode) jsonRoot.get("jsonPayload")).remove("latencySeconds");
+                }
+                if (null != latency) {
+                    backendLatency = Double.valueOf(latency.substring(0, latency.length() - 1));
+                    ((ObjectNode) jsonRoot.get("httpRequest"))
+                        .put("backendLatency", backendLatency);
+                }
 
                 // backednLatency2, latency between GFE_layer2 and origin
                 Double backendLatency2 = null;
@@ -172,8 +181,10 @@ public class BindiegoStreaming {
                     ((ObjectNode) jsonRoot.get("jsonPayload")).remove("backendLatency");
 
                     // calculate latency between GFE_layer1 and GFE_layer2
-                    ((ObjectNode) jsonRoot.get("httpRequest"))
-                        .put("gfeLatency", (backendLatency - backendLatency2));
+                    if (null != backendLatency) {
+                        ((ObjectNode) jsonRoot.get("httpRequest"))
+                            .put("gfeLatency", (backendLatency - backendLatency2));
+                    }
                 }
 
                 // Frontend SRTT, latency between client and GFE_layer1
