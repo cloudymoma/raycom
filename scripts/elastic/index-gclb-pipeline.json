@@ -19,6 +19,14 @@
           "target_field" : "httpRequest.geo",
           "ignore_missing": true
         }
+      },
+      {
+        "geoip" : {
+          "field" : "httpRequest.remoteIp",
+          "target_field" : "httpRequest.remoteIpIsp",
+          "database_file" : "GeoLite2-ASN.mmdb",
+          "ignore_missing": true
+        }
       }
     ]
 }

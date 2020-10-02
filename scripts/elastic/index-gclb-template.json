@@ -54,12 +54,32 @@
                             }
                         }
                     },
-                    "remoteIpASN": {
-                        "type": "text",
-                        "fields": {
-                            "keyword": {
-                                "type": "keyword",
-                                "ignore_above": 256
+                    "remoteIpIsp": {
+                        "properties": {
+                            "asn": {
+                                "type": "text",
+                                "fields": {
+                                    "keyword": {
+                                        "type": "keyword",
+                                        "ignore_above": 256
+                                    },
+                                    "int": {
+                                        "type": "integer",
+                                        "ignore_malformed": true
+                                    }
+                                }
+                            },
+                            "organization_name": {
+                                "type": "text",
+                                "fields": {
+                                    "keyword": {
+                                        "type": "keyword",
+                                        "ignore_above": 256
+                                    }
+                                }
+                            },
+                            "ip": {
+                                "type": "ip"
                             }
                         }
                     },
