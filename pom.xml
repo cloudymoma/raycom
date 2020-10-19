@@ -56,7 +56,7 @@
     <nemo.version>0.1</nemo.version>
     <json.version>20160810</json.version>
     <mysql.ver>8.0.19</mysql.ver>
-    <elastic.ver>7.9.1</elastic.ver>
+    <elastic.ver>7.9.2</elastic.ver>
     <auto-value.version>1.7.2</auto-value.version>
   </properties>
 
