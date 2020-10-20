@@ -1,7 +1,7 @@
 package bindiego;
 
-import  bindiego.BindiegoStreamingOptions;
-
+import bindiego.io.elastic.ConnectionConf;
+import bindiego.io.elastic.RetryConf;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,9 +20,7 @@ import org.apache.hadoop.hbase.util.Bytes;
 
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableSchema;
-import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
-import com.google.api.services.bigquery.model.Clustering;
 import com.google.api.services.bigquery.model.TimePartitioning;
 
 import com.google.cloud.bigtable.beam.CloudBigtableIO;
@@ -38,49 +36,20 @@ import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.FileBasedSink;
-import org.apache.beam.sdk.io.FileSystems;
-import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.jdbc.JdbcIO;
-import org.apache.beam.sdk.io.GenerateSequence;
-import org.apache.beam.sdk.metrics.Counter;
-import org.apache.beam.sdk.metrics.Distribution;
-import org.apache.beam.sdk.metrics.Metrics;
-import org.apache.beam.sdk.options.Default;
-import org.apache.beam.sdk.options.Description;
-import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.options.StreamingOptions;
-import org.apache.beam.sdk.options.Validation.Required;
-import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.NestedValueProvider;
-import org.apache.beam.sdk.transforms.Count;
-import org.apache.beam.sdk.transforms.Sum;
-import org.apache.beam.sdk.transforms.Min;
-import org.apache.beam.sdk.transforms.Max;
-import org.apache.beam.sdk.transforms.Mean;
-import org.apache.beam.sdk.transforms.Latest;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.DoFn.MultiOutputReceiver;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
-import org.apache.beam.sdk.transforms.windowing.AfterEach;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
-import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.AfterPane;
 import org.apache.beam.sdk.transforms.windowing.Window.ClosingBehavior;
-import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
-import org.apache.beam.sdk.transforms.ToString;
-import org.apache.beam.sdk.transforms.WithTimestamps;
 import org.apache.beam.sdk.transforms.GroupByKey;
-import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -101,10 +70,10 @@ import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.codehaus.jackson.map.ObjectMapper;
 
-import bindiego.io.WindowedFilenamePolicy;
+import bindiego.io.elastic.WindowedFilenamePolicy;
 import bindiego.utils.DurationUtils;
 import bindiego.utils.SchemaParser;
-import bindiego.io.ElasticsearchIO;
+import bindiego.io.elastic.ElasticsearchIO;
 
 public class BindiegoStreaming {
     /* extract the csv payload from message */
@@ -800,7 +769,7 @@ public class BindiegoStreaming {
                     .withMaxBatchSize(options.getEsMaxBatchSize())
                     .withMaxBatchSizeBytes(options.getEsMaxBatchBytes())
                     .withConnectionConf(
-                        ElasticsearchIO.ConnectionConf.create(
+                        ConnectionConf.create(
                             options.getEsHost(),
                             options.getEsIndex())
                                 .withUsername(options.getEsUser())
@@ -808,7 +777,7 @@ public class BindiegoStreaming {
                                 .withNumThread(options.getEsNumThread()))
                                 //.withTrustSelfSignedCerts(true)) // false by default
                     .withRetryConf(
-                        ElasticsearchIO.RetryConf.create(6, Duration.standardSeconds(60))));
+                        RetryConf.create(6, Duration.standardSeconds(60))));
         /* END - Elasticsearch */
 
         healthData.apply("Write windowed healthy CSV files", 

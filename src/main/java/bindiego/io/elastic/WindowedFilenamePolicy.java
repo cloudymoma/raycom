@@ -1,4 +1,4 @@
-package bindiego.io;
+package bindiego.io.elastic;
 
 import org.apache.beam.sdk.io.DefaultFilenamePolicy;
 import org.apache.beam.sdk.io.FileBasedSink.FilenamePolicy;
