@@ -50,7 +50,7 @@ dfup:
         --jobName=$(job) \
         --update \
         --region=$(region) \
-        --worker-zone=$(region)-$(workerZone)"
+        --workerZone=$(region)-$(workerZone)"
 
 df:
 	@mvn -Pdataflow-runner compile exec:java \
@@ -88,7 +88,7 @@ df:
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region) \
-        --worker-zone=$(region)-$(workerZone)"
+        --workerZone=$(region)-$(workerZone)"
 
 cancel:
 	@gcloud dataflow jobs cancel $(job) --region=$(region)
