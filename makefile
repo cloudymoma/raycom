@@ -4,6 +4,8 @@ jdbcuri := jdbc:mysql://10.140.0.3:3306/gcp
 jdbcusr := gcp
 jdbcpwd := gcp2020
 region := asia-east1
+workerType := e2-standard-2
+workerZone := b
 job := raycom-streaming
 eshost := https://k8es.ingest.bindiego.com
 esuser := elastic
@@ -18,7 +20,7 @@ dfup:
         --streaming=true \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
-        --workerMachineType=n1-standard-2 \
+        --workerMachineType=$(workerType) \
         --diskSizeGb=64 \
         --numWorkers=3 \
         --tempLocation=gs://bindiego/tmp/ \
@@ -53,7 +55,8 @@ dfup:
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --update \
-        --region=$(region)"
+        --region=$(region) \
+        --workerZone=$(region)-$(workerZone)"
 
 df:
 	@mvn -Pdataflow-runner compile exec:java \
@@ -63,7 +66,7 @@ df:
         --streaming=true \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
-        --workerMachineType=n1-standard-2 \
+        --workerMachineType=$(workerType) \
         --diskSizeGb=64 \
         --numWorkers=3 \
         --tempLocation=gs://bindiego/tmp/ \
@@ -97,7 +100,8 @@ df:
         --esIndex=$(esindex) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
-        --region=$(region)"
+        --region=$(region) \
+        --workerZone=$(region)-$(workerZone)"
 
 cancel:
 	@gcloud dataflow jobs cancel $(job) --region=$(region)
