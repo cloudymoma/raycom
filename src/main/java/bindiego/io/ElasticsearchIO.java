@@ -11,6 +11,7 @@ import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.client.ResponseListener;
 import org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback;
 
+import org.apache.http.Header;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
@@ -29,6 +30,7 @@ import org.apache.http.impl.nio.reactor.IOReactorConfig;
 import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
 import org.apache.http.ssl.SSLContextBuilder;
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.message.BasicHeader;
 
 import com.google.auto.value.AutoValue;
 
@@ -62,6 +64,7 @@ import java.security.KeyManagementException;
 
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
 
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.annotations.Experimental.Kind;
@@ -124,6 +127,8 @@ public class ElasticsearchIO {
         @Nullable
         public abstract String getPassword();
 
+        public abstract @Nullable String getApiKey();
+
         @Nullable
         public abstract Integer getSocketTimeout();
 
@@ -143,6 +148,7 @@ public class ElasticsearchIO {
         @Nullable 
         public abstract String getKeystorePassword();
 
+        // added for ignore self-signed certs
         public abstract boolean isIgnoreInsecureSSL();
 
         abstract Builder builder();
@@ -155,6 +161,8 @@ public class ElasticsearchIO {
             abstract Builder setUsername(String username);
 
             abstract Builder setPassword(String password);
+
+            abstract Builder setApiKey(String apiKey);
 
             abstract Builder setSocketTimeout(Integer maxRetryTimeout);
 
@@ -200,6 +208,11 @@ public class ElasticsearchIO {
             checkArgument(password != null, "password can not be null");
             checkArgument(!password.isEmpty(), "password can not be empty");
             return builder().setPassword(password).build();
+        }
+
+        public ConnectionConf withApiKey(String apiKey) {
+            checkArgument(!Strings.isNullOrEmpty(apiKey), "apiKey can not be null or empty");
+            return builder().setApiKey(apiKey).build();
         }
 
         public ConnectionConf withTrustSelfSignedCerts(boolean trustSelfSignedCerts) {
@@ -299,6 +312,11 @@ public class ElasticsearchIO {
                             }
                     }
                 );
+            }
+
+            if (getApiKey() != null) {
+                restClientBuilder.setDefaultHeaders(
+                new Header[] {new BasicHeader("Authorization", "ApiKey " + getApiKey())});
             }
 
             if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
