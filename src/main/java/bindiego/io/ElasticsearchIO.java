@@ -7,7 +7,7 @@ import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClientBuilder;
-import org.elasticsearch.client.RestHighLevelClient;
+// import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.client.ResponseListener;
 import org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback;
 

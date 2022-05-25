@@ -41,7 +41,7 @@
     <hamcrest.version>1.3</hamcrest.version>
     <jackson.version>2.10.4</jackson.version>
     <joda.version>2.10.5</joda.version>
-    <junit.version>4.13</junit.version>
+    <junit.version>4.13.1</junit.version>
     <maven-compiler-plugin.version>3.7.0</maven-compiler-plugin.version>
     <maven-exec-plugin.version>1.6.0</maven-exec-plugin.version>
     <maven-jar-plugin.version>3.0.2</maven-jar-plugin.version>
@@ -54,8 +54,10 @@
     <maven-surefire-plugin.version>2.21.0</maven-surefire-plugin.version>
     <nemo.version>0.1</nemo.version>
     <json.version>20160810</json.version>
-    <mysql.ver>8.0.19</mysql.ver>
-    <elastic.ver>7.14.2</elastic.ver>
+    <mysql.ver>8.0.29</mysql.ver>
+    <elastic.ver>8.2.1</elastic.ver>
+    <fasterxml.ver>2.12.3</fasterxml.ver>
+    <jakarta.ver>2.0.1</jakarta.ver>
     <auto-value.version>1.7.2</auto-value.version>
   </properties>
 
@@ -581,11 +583,32 @@
       <artifactId>elasticsearch-rest-client</artifactId>
       <version>${elastic.ver}</version>
     </dependency>
+    <!--
     <dependency>
       <groupId>org.elasticsearch.client</groupId>
       <artifactId>elasticsearch-rest-high-level-client</artifactId>
       <version>${elastic.ver}</version>
     </dependency>
+    -->
+
+    <!-- Elasticsearch Java API Client -->
+    <!--
+    <dependency>
+      <groupId>co.elastic.clients</groupId>
+      <artifactId>elasticsearch-java</artifactId>
+      <version>${elastic.ver}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${fasterxml.ver}</version>
+    </dependency>
+    <dependency>
+      <groupId>jakarta.json</groupId>
+      <artifactId>jakarta.json-api</artifactId>
+      <version>${jakarta.ver}</version>
+    </dependency>
+    -->
 
     <!-- Google AutoValue -->
     <dependency>
