@@ -127,4 +127,9 @@ public interface BindiegoStreamingOptions
     @Default.Integer(1)
     Integer getEsNumThread();
     void setEsNumThread(Integer value);
+
+    @Description("Elasticsearch Rest client threads")
+    @Default.Boolean(false)
+    Boolean getEsIsIgnoreInsecureSSL();
+    void setEsIsIgnoreInsecureSSL(Boolean value);
 }
