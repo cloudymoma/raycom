@@ -25,7 +25,7 @@ Java dev environment
 
 Elasticsearch
 - Option 1: [Run your own](https://github.com/bindiego/local_services/tree/develop/elastic)
-- Option 2: [Run on k8s / GKE](https://github.com/bindiego/local_services/tree/develop/k8s/gke/elastic), recommended :)
+- Option 2: [Run on k8s / GKE](https://github.com/elasticsearch-cn/elastic-on-gke), recommended :)
 - Option 3: [Run on Elastic Cloud](https://cloud.elastic.co/)
 
 ##### Preparation
