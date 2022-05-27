@@ -12,6 +12,7 @@ esindex := gclb-ingest
 esBatchSize := 2000
 esBatchBytes := 10485760
 esNumThread := 2
+esIsIgnoreInsecureSSL := false
 
 dfup:
 	@mvn -Pdataflow-runner compile exec:java \
@@ -46,6 +47,7 @@ dfup:
         --esMaxBatchSize=$(esBatchSize) \
         --esMaxBatchBytes=$(esBatchBytes) \
         --esNumThread=$(esNumThread) \
+        --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --update \
@@ -85,6 +87,7 @@ df:
         --esMaxBatchSize=$(esBatchSize) \
         --esMaxBatchBytes=$(esBatchBytes) \
         --esNumThread=$(esNumThread) \
+        --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region) \
