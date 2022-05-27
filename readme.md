@@ -69,6 +69,16 @@ Double check the paramters passed to the job trigger in `makefile`, then,
 make df
 ```
 
+###### FAQs 常见问题
+
+1. SSL connection issue 
+
+You may need to change the `esIsIgnoreInsecureSSL` in [`makefile`](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/makefile#L15) here to `true` in case you have a self-signed certificate.
+
+2. GCP related IAM / permission issues
+
+Please consult the [Dataflow security and permissions ](https://cloud.google.com/dataflow/docs/concepts/security-and-permissions#security_and_permissions_for_pipelines_on_google_cloud_platform) for details. Generally you will need to grant permissions for both dataflow controller & compute engine service accounts for the GCP resources used, i.e. Pubsub, GCS aka Cloud Storage etc.
+
 ##### Why exclude url contains the *ingest* keyword
 
 First of all, we could do it when create a the [sink](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/gcp_setup.sh#L16-L17). Or in the Elasticsearch [pipeline](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/index-gclb-pipeline.json#L4-L8). It's highly recommended to do it at the sink. That would be more efficient. We only demonstrate how to use that *drop* processor here in the code in case you may need for other purposes.
