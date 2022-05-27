@@ -11,6 +11,10 @@ eshost := https://k8es.ingest.bindiego.com
 esuser := elastic
 espass := changeme
 esindex := raycom-dataflow-ingest
+esBatchSize := 2000
+esBatchBytes := 10485760
+esNumThread := 2
+esIsIgnoreInsecureSSL := false
 
 dfup:
 	@mvn -Pdataflow-runner compile exec:java \
@@ -52,6 +56,10 @@ dfup:
         --esUser=$(esuser) \
         --esPass=$(espass) \
         --esIndex=$(esindex) \
+        --esMaxBatchSize=$(esBatchSize) \
+        --esMaxBatchBytes=$(esBatchBytes) \
+        --esNumThread=$(esNumThread) \
+        --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --update \
@@ -98,6 +106,10 @@ df:
         --esUser=$(esuser) \
         --esPass=$(espass) \
         --esIndex=$(esindex) \
+        --esMaxBatchSize=$(esBatchSize) \
+        --esMaxBatchBytes=$(esBatchBytes) \
+        --esNumThread=$(esNumThread) \
+        --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region) \
