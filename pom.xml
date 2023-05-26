@@ -53,7 +53,7 @@
     <hadoop.version>3.3.4</hadoop.version>
     <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
     <nemo.version>0.1</nemo.version>
-    <json.version>20160810</json.version>
+    <json.version>20230227</json.version>
     <mysql.ver>8.0.31</mysql.ver>
     <elastic.ver>8.5.3</elastic.ver>
     <fasterxml.ver>2.12.3</fasterxml.ver>
