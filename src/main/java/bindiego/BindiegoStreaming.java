@@ -805,7 +805,8 @@ public class BindiegoStreaming {
                             options.getEsIndex())
                                 .withUsername(options.getEsUser())
                                 .withPassword(options.getEsPass())
-                                .withNumThread(options.getEsNumThread()))
+                                .withNumThread(options.getEsNumThread())
+                                .withIngnoreInsecureSSL(options.getEsIsIgnoreInsecureSSL().booleanValue()))
                                 //.withTrustSelfSignedCerts(true)) // false by default
                     .withRetryConf(
                         ElasticsearchIO.RetryConf.create(6, Duration.standardSeconds(60))));
