@@ -1,6 +1,4 @@
-## Apache Beam Sample
-
-[![Build Status](https://jenkins.bindiego.com/buildStatus/icon?job=raycom-streaming)](https://jenkins.bindiego.com/job/raycom-streaming/)
+## A Comprehensive Data Platform on GCP by using Apache Beam
 
 You can use this master branch as a skeleton java project
 
@@ -14,7 +12,7 @@ beam代码理论上可以驱动spark，flink等等流式框架，详情参考[�
 
 ### Proposed streaming pipeline
 
-#### IMPORTANT: in the sample code, assume the pubsub message is csv text encoded in utf-8
+#### IMPORTANT: in the sample code, assume the pubsub message is json text encoded in utf-8
 
 pubsub/kafka -> dataflow/flink -> join dimesion table -> data processing (realtime calculation + data warehouse ingestion + back files) -> GCS(avro, csv for both data & deadleter) + BigQuery + HBase/Bigtable (realtime analysis) + Elasticsearch
 

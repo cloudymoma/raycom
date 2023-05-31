@@ -21,7 +21,7 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>bindiego</groupId>
-  <artifactId>raycom-dataflow-sample</artifactId>
+  <artifactId>raycom-streaming-skeleton</artifactId>
   <version>1.0.0</version>
 
   <packaging>jar</packaging>
@@ -31,34 +31,27 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-    <beam.version>2.47.0</beam.version>
-
-    <bigquery.version>v2-rev20191211-1.30.9</bigquery.version>
-    <bigtable.ver>2.6.5</bigtable.ver>
-    <google-api-clients.version>2.1.2</google-api-clients.version>
-    <google-http-clients.version>1.42.3</google-http-clients.version>
-    <guava.version>31.1-jre</guava.version>
-    <hamcrest.version>1.3</hamcrest.version>
-    <jackson.version>2.10.4</jackson.version>
-    <joda.version>2.10.5</joda.version>
-    <junit.version>4.13.1</junit.version>
     <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
     <maven-exec-plugin.version>3.1.0</maven-exec-plugin.version>
     <maven-jar-plugin.version>3.3.0</maven-jar-plugin.version>
     <maven-shade-plugin.version>3.4.1</maven-shade-plugin.version>
-    <mockito.version>1.10.19</mockito.version>
-    <pubsub.version>v1-rev452-1.25.0</pubsub.version>
-    <slf4j.version>1.7.25</slf4j.version>
-    <spark.version>2.44.0</spark.version>
-    <hadoop.version>3.3.4</hadoop.version>
-    <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
-    <nemo.version>0.1</nemo.version>
+    <maven-surefire-plugin.version>3.1.0</maven-surefire-plugin.version>
+
+    <beam.version>2.47.0</beam.version>
+
+    <bigtable.ver>2.8.1</bigtable.ver>
+    <guava.version>31.1-jre</guava.version>
+    <spark3.version>3.2.4</spark3.version>
+    <joda.version>2.12.5</joda.version>
+    <junit.version>4.13.1</junit.version>
+    <slf4j.version>1.7.30</slf4j.version>    
     <json.version>20230227</json.version>
-    <mysql.ver>8.0.31</mysql.ver>
-    <elastic.ver>8.5.3</elastic.ver>
-    <fasterxml.ver>2.12.3</fasterxml.ver>
-    <jakarta.ver>2.0.1</jakarta.ver>
+    <mysql.ver>8.0.33</mysql.ver>
+    <elastic.ver>8.8.0</elastic.ver>
     <auto-value.version>1.10.1</auto-value.version>
+    <gson.ver>2.10.1</gson.ver>
+    <hadoop.version>3.3.4</hadoop.version>
+    <nemo.version>0.4</nemo.version>
   </properties>
 
   <repositories>
@@ -83,6 +76,16 @@
       <snapshots>
         <enabled>true</enabled>
       </snapshots>
+    </repository>
+    <repository>
+        <id>beam-release-repo</id>
+        <name>Beam Release Repo</name>
+        <url>https://repository.apache.org/content/repositories/orgapachebeam-1346</url>
+    </repository>
+    <repository>
+        <id>spark-release-repo</id>
+        <name>Spark Release Repo</name>
+        <url>https://repository.apache.org/content/repositories/orgapachespark-1367</url>
     </repository>
   </repositories>
 
@@ -286,7 +289,7 @@
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
-          <artifactId>beam-runners-flink_2.11</artifactId>
+          <artifactId>beam-runners-flink-1.16</artifactId>
           <version>${beam.version}</version>
           <scope>runtime</scope>
         </dependency>
@@ -294,61 +297,58 @@
     </profile>
 
     <profile>
-      <id>spark-runner</id>
-      <!-- Makes the SparkRunner available when running a pipeline. Additionally,
-           overrides some Spark dependencies to Beam-compatible versions. -->
-      <properties>
-        <netty.version>4.1.17.Final</netty.version>
-      </properties>
-      <dependencies>
-        <dependency>
-          <groupId>org.apache.beam</groupId>
-          <artifactId>beam-runners-spark</artifactId>
-          <version>${beam.version}</version>
-          <scope>runtime</scope>
-        </dependency>
-        <dependency>
-          <groupId>org.apache.beam</groupId>
-          <artifactId>beam-sdks-java-io-hadoop-file-system</artifactId>
-          <version>${beam.version}</version>
-          <scope>runtime</scope>
-        </dependency>
-        <dependency>
-          <groupId>org.apache.spark</groupId>
-          <artifactId>spark-streaming_2.11</artifactId>
-          <version>${spark.version}</version>
-          <scope>runtime</scope>
-          <exclusions>
-            <exclusion>
-              <groupId>org.slf4j</groupId>
-              <artifactId>jul-to-slf4j</artifactId>
-            </exclusion>
-          </exclusions>
-        </dependency>
-        <dependency>
-          <groupId>com.fasterxml.jackson.module</groupId>
-          <artifactId>jackson-module-scala_2.11</artifactId>
-          <version>${jackson.version}</version>
-          <scope>runtime</scope>
-        </dependency>
-        <!-- [BEAM-3519] GCP IO exposes netty on its API surface, causing conflicts with runners -->
-        <dependency>
-          <groupId>org.apache.beam</groupId>
-          <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
-          <version>${beam.version}</version>
-          <exclusions>
-            <exclusion>
-              <groupId>io.grpc</groupId>
-              <artifactId>grpc-netty</artifactId>
-            </exclusion>
-            <exclusion>
-              <groupId>io.netty</groupId>
-              <artifactId>netty-handler</artifactId>
-            </exclusion>
-          </exclusions>
-        </dependency>
-      </dependencies>
+        <id>spark3-runner</id>
+        <dependencies>
+            <dependency>
+                <groupId>org.apache.beam</groupId>
+                <artifactId>beam-runners-spark-3</artifactId>
+                <version>${beam.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-sql_2.13</artifactId>
+                <version>${spark3.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-streaming_2.13</artifactId>
+                <version>${spark3.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.thoughtworks.paranamer</groupId>
+                <artifactId>paranamer</artifactId>
+                <version>2.8</version>
+                <scope>runtime</scope>
+            </dependency>
+        </dependencies>
     </profile>
+    <profile>
+        <id>spark3-runner-scala-2.13</id>
+        <dependencies>
+            <dependency>
+                <groupId>org.apache.beam</groupId>
+                <artifactId>beam-runners-spark-3</artifactId>
+                <version>${beam.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-sql_2.13</artifactId>
+                <version>${spark3.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-streaming_2.13</artifactId>
+                <version>${spark3.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+        </dependencies>
+    </profile>
+
     <profile>
       <id>gearpump-runner</id>
       <dependencies>
@@ -398,26 +398,58 @@
     </profile>
   </profiles>
 
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-bom</artifactId>
+        <version>${beam.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <!-- Adds a dependency on the Beam SDK. -->
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-core</artifactId>
-      <version>${beam.version}</version>
+    </dependency>
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-extensions-google-cloud-platform-core</artifactId>
     </dependency>
 
     <!-- Adds a dependency on the Beam Google Cloud Platform IO module. -->
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
-      <version>${beam.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-io-google-cloud-platform-expansion-service</artifactId>
     </dependency>
 
-    <!-- JDBC connector -->
+    <!-- IOs -->
     <dependency>
         <groupId>org.apache.beam</groupId>
         <artifactId>beam-sdks-java-io-jdbc</artifactId>
-      <version>${beam.version}</version>
+    </dependency>
+
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-io-elasticsearch</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-io-hbase</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-sdks-java-io-kafka</artifactId>
     </dependency>
 
     <!-- Bigtable/HBase Beam connector -->
@@ -438,63 +470,6 @@
         <version>${bigtable.ver}</version>
     </dependency>
     -->
-
-    <!-- Dependencies below this line are specific dependencies needed by the examples code. -->
-    <dependency>
-      <groupId>com.google.api-client</groupId>
-      <artifactId>google-api-client</artifactId>
-      <version>${google-api-clients.version}</version>
-      <exclusions>
-        <!-- Exclude an old version of guava that is being pulled
-             in by a transitive dependency of google-api-client -->
-        <exclusion>
-          <groupId>com.google.guava</groupId>
-          <artifactId>guava-jdk5</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <dependency>
-      <groupId>com.google.apis</groupId>
-      <artifactId>google-api-services-bigquery</artifactId>
-      <version>${bigquery.version}</version>
-      <exclusions>
-        <!-- Exclude an old version of guava that is being pulled
-             in by a transitive dependency of google-api-client -->
-        <exclusion>
-          <groupId>com.google.guava</groupId>
-          <artifactId>guava-jdk5</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <dependency>
-      <groupId>com.google.http-client</groupId>
-      <artifactId>google-http-client</artifactId>
-      <version>${google-http-clients.version}</version>
-      <exclusions>
-        <!-- Exclude an old version of guava that is being pulled
-             in by a transitive dependency of google-api-client -->
-        <exclusion>
-          <groupId>com.google.guava</groupId>
-          <artifactId>guava-jdk5</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <dependency>
-      <groupId>com.google.apis</groupId>
-      <artifactId>google-api-services-pubsub</artifactId>
-      <version>${pubsub.version}</version>
-      <exclusions>
-        <!-- Exclude an old version of guava that is being pulled
-             in by a transitive dependency of google-api-client -->
-        <exclusion>
-          <groupId>com.google.guava</groupId>
-          <artifactId>guava-jdk5</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
 
     <dependency>
       <groupId>joda-time</groupId>
@@ -523,20 +498,6 @@
       <scope>runtime</scope>
     </dependency>
 
-    <!-- Hamcrest and JUnit are required dependencies of PAssert,
-         which is used in the main code of DebuggingWordCount example. -->
-    <dependency>
-      <groupId>org.hamcrest</groupId>
-      <artifactId>hamcrest-core</artifactId>
-      <version>${hamcrest.version}</version>
-    </dependency>
-    
-    <dependency>
-      <groupId>org.hamcrest</groupId>
-      <artifactId>hamcrest-library</artifactId>
-      <version>${hamcrest.version}</version>
-    </dependency>
-
     <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
@@ -557,13 +518,6 @@
       <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
       <version>${beam.version}</version>
     </dependency>
-    
-    <dependency>
-      <groupId>org.mockito</groupId>
-      <artifactId>mockito-core</artifactId>
-      <version>${mockito.version}</version>
-      <scope>test</scope>
-    </dependency>
 
     <dependency>
       <groupId>org.json</groupId>
@@ -583,38 +537,19 @@
       <artifactId>elasticsearch-rest-client</artifactId>
       <version>${elastic.ver}</version>
     </dependency>
-    <!--
-    <dependency>
-      <groupId>org.elasticsearch.client</groupId>
-      <artifactId>elasticsearch-rest-high-level-client</artifactId>
-      <version>${elastic.ver}</version>
-    </dependency>
-    -->
-
-    <!-- Elasticsearch Java API Client -->
-    <!--
-    <dependency>
-      <groupId>co.elastic.clients</groupId>
-      <artifactId>elasticsearch-java</artifactId>
-      <version>${elastic.ver}</version>
-    </dependency>
-    <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-databind</artifactId>
-      <version>${fasterxml.ver}</version>
-    </dependency>
-    <dependency>
-      <groupId>jakarta.json</groupId>
-      <artifactId>jakarta.json-api</artifactId>
-      <version>${jakarta.ver}</version>
-    </dependency>
-    -->
 
     <!-- Google AutoValue -->
     <dependency>
       <groupId>com.google.auto.value</groupId>
       <artifactId>auto-value-annotations</artifactId>
       <version>${auto-value.version}</version>
+    </dependency>
+
+    <!-- I Love GSon -->
+    <dependency>
+        <groupId>com.google.code.gson</groupId>
+        <artifactId>gson</artifactId>
+        <version>${gson.ver}</version>
     </dependency>
   </dependencies>
 </project>

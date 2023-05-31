@@ -1,12 +1,18 @@
 pwd := $(shell pwd)
 ipaddr := $(shell hostname -I | cut -d ' ' -f 1)
-jdbcuri := jdbc:mysql://10.140.0.3:3306/gcp
-jdbcusr := gcp
-jdbcpwd := gcp2020
+gcp_project := du-hast-mich
 region := asia-east1
 workerType := e2-standard-2
 workerZone := b
 job := raycom-streaming
+pubsub_topic := firebase-rt-topic
+pubsub_sub := firebase-rt-sub
+bq_firebase_schema := bq_firebase.json
+gcs_bucket := bindiego
+jdbcuri := jdbc:mysql://10.140.0.3:3306/gcp
+jdbcusr := gcp
+jdbcpwd := gcp2020
+bigtable_instance := bigbase
 eshost := https://k8es.ingest.bindiego.com
 esuser := elastic
 espass := changeme
@@ -20,32 +26,32 @@ dfup:
 	@mvn -Pdataflow-runner compile exec:java \
         -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.cleanupDaemonThreads=false \
-        -Dexec.args="--project=google.com:bin-wus-learning-center \
+        -Dexec.args="--project=$(gcp_project) \
         --streaming=true \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
         --workerMachineType=$(workerType) \
         --diskSizeGb=64 \
         --numWorkers=3 \
-        --tempLocation=gs://bindiego/tmp/ \
-        --gcpTempLocation=gs://bindiego/tmp/gcp/ \
-        --gcsTempLocation=gs://bindiego/tmp/gcs/ \
-        --stagingLocation=gs://bindiego/staging/ \
+        --tempLocation=gs://$(gcs_bucket)/tmp/ \
+        --gcpTempLocation=gs://$(gcs_bucket)/tmp/gcp/ \
+        --gcsTempLocation=gs://$(gcs_bucket)/tmp/gcs/ \
+        --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
-        --topic=projects/google.com:bin-wus-learning-center/topics/dingoactions \
-        --subscription=projects/google.com:bin-wus-learning-center/subscriptions/dingoactions2avro \
+        --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
+        --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
         --windowSize=6s \
         --allowedLateness=8s \
         --earlyFiringPeriod=2s \
         --lateFiringCount=1 \
         --filenamePrefix=raycom. \
-        --outputDir=gs://bindiego/raycom/out/ \
-        --errOutputDir=gs://bindiego/raycom/out/err/ \
-        --bqSchema=gs://bindiego/raycom/schemas/dingoactions.json \
-        --bqOutputTable=google.com:bin-wus-learning-center:raycom.dingoactions \
-        --avroSchema=gs://bindiego/raycom/schemas/dingoactions.avsc \
-        --btInstanceId=bigbase \
+        --outputDir=gs://$(gcs_bucket)/raycom/out/ \
+        --errOutputDir=gs://$(gcs_bucket)/raycom/out/err/ \
+        --bqSchema=gs://$(gcs_bucket)/raycom/schemas/$(bq_firebase_schema) \
+        --bqOutputTable=$(gcp_project):raycom.firebase_rt \
+        --avroSchema=gs://$(gcs_bucket)/raycom/schemas/dingoactions.avsc \
+        --btInstanceId=$(bigtable_instance) \
         --btTableIdTall=bttall \
         --btTableIdWide=btwide \
         --jdbcClass=com.mysql.cj.jdbc.Driver \
@@ -70,32 +76,32 @@ df:
 	@mvn -Pdataflow-runner compile exec:java \
         -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.cleanupDaemonThreads=false \
-        -Dexec.args="--project=google.com:bin-wus-learning-center \
+        -Dexec.args="--project=$(gcp_project) \
         --streaming=true \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
         --workerMachineType=$(workerType) \
         --diskSizeGb=64 \
         --numWorkers=3 \
-        --tempLocation=gs://bindiego/tmp/ \
-        --gcpTempLocation=gs://bindiego/tmp/gcp/ \
-        --gcsTempLocation=gs://bindiego/tmp/gcs/ \
-        --stagingLocation=gs://bindiego/staging/ \
+        --tempLocation=gs://$(gcs_bucket)/tmp/ \
+        --gcpTempLocation=gs://$(gcs_bucket)/tmp/gcp/ \
+        --gcsTempLocation=gs://$(gcs_bucket)/tmp/gcs/ \
+        --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
-        --topic=projects/google.com:bin-wus-learning-center/topics/dingoactions \
-        --subscription=projects/google.com:bin-wus-learning-center/subscriptions/dingoactions2avro \
+        --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
+        --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
         --windowSize=6s \
         --allowedLateness=8s \
         --earlyFiringPeriod=2s \
         --lateFiringCount=1 \
         --filenamePrefix=raycom. \
-        --outputDir=gs://bindiego/raycom/out/ \
-        --errOutputDir=gs://bindiego/raycom/out/err/ \
-        --bqSchema=gs://bindiego/raycom/schemas/dingoactions.json \
-        --bqOutputTable=google.com:bin-wus-learning-center:raycom.dingoactions \
-        --avroSchema=gs://bindiego/raycom/schemas/dingoactions.avsc \
-        --btInstanceId=bigbase \
+        --outputDir=gs://$(gcs_bucket)/raycom/out/ \
+        --errOutputDir=gs://$(gcs_bucket)/raycom/out/err/ \
+        --bqSchema=gs://$(gcs_bucket)/raycom/schemas/$(bq_firebase_schema) \
+        --bqOutputTable=$(gcp_project):raycom.firebase_rt \
+        --avroSchema=gs://$(gcs_bucket)/raycom/schemas/dingoactions.avsc \
+        --btInstanceId=$(bigtable_instance) \
         --btTableIdTall=bttall \
         --btTableIdWide=btwide \
         --jdbcClass=com.mysql.cj.jdbc.Driver \
@@ -122,10 +128,10 @@ drain:
 	@gcloud dataflow jobs drain $(job) --region=$(region)
 
 btcluster:
-	@cbt createinstance bigbase "Bigbase" bigbaby $(region)-a 1 SSD
+	@cbt createinstance $(bigtable_instance) "Bigbase" bigbaby $(region)-a 1 SSD
 
 btrelease:
-	@cbt deleteinstance bigbase
+	@cbt deleteinstance $(bigtable_instance)
 
 btinit:
 	@cbt createtable bttall && \
@@ -144,4 +150,16 @@ btdata:
 	@-echo "============= Tall ================"; cbt read bttall count=10
 	@-echo "============= Wide ================"; cbt read btwide count=10
 
-.PHONY: df dfup cancel drain btcluster btinit btdata btclear btrelease
+pubsub_init:
+	@-gcloud pubsub topics create $(pubsub_topic)
+	@-gcloud pubsub subscriptions create $(pubsub_sub) --topic=$(pubsub_topic) --topic-project=$(gcp_project)
+
+gcs_init:
+	@-gcloud storage buckets create gs://$(gcs_bucket) --project=$(gcp_project) --default-storage-class=STANDARD --location=$(region)  --uniform-bucket-level-access
+	@-gsutil cp schemas/$(bq_firebase_schema) gs://$(gcs_bucket)/raycom/schemas/$(bq_firebase_schema)
+	@-gsutil cp schemas/dingoactions.avsc gs://$(gcs_bucket)/raycom/schemas/dingoactions.avsc
+
+bq_init:
+	@-bq --location=US mk --dataset raycom
+
+.PHONY: df dfup cancel drain btcluster btinit btdata btclear btrelease pubsub_init gcs_init
