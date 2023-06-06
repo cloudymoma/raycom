@@ -8,6 +8,7 @@ job := raycom-streaming
 pubsub_topic := firebase-rt-topic
 pubsub_sub := firebase-rt-sub
 bq_firebase_schema := bq_firebase.json
+bq_storageWriteApiTriggeringFrequencySec := 60
 gcs_bucket := bindiego
 jdbcuri := jdbc:mysql://10.140.0.3:3306/gcp
 jdbcusr := gcp
@@ -21,8 +22,15 @@ esBatchSize := 2000
 esBatchBytes := 10485760
 esNumThread := 2
 esIsIgnoreInsecureSSL := false
+isBasic := true
 
-dfup:
+clean:
+	@mvn clean
+
+build:
+	@mvn compile
+
+dfup: build
 	@mvn -Pdataflow-runner compile exec:java \
         -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.cleanupDaemonThreads=false \
@@ -50,6 +58,7 @@ dfup:
         --errOutputDir=gs://$(gcs_bucket)/raycom/out/err/ \
         --bqSchema=gs://$(gcs_bucket)/raycom/schemas/$(bq_firebase_schema) \
         --bqOutputTable=$(gcp_project):raycom.firebase_rt \
+        --storageWriteApiTriggeringFrequencySec=$(bq_storageWriteApiTriggeringFrequencySec) \
         --avroSchema=gs://$(gcs_bucket)/raycom/schemas/dingoactions.avsc \
         --btInstanceId=$(bigtable_instance) \
         --btTableIdTall=bttall \
@@ -70,9 +79,10 @@ dfup:
         --jobName=$(job) \
         --update \
         --region=$(region) \
-        --workerZone=$(region)-$(workerZone)"
+        --workerZone=$(region)-$(workerZone) \
+        --isBasic=$(isBasic)"
 
-df:
+df: build
 	@mvn -Pdataflow-runner compile exec:java \
         -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.cleanupDaemonThreads=false \
@@ -100,6 +110,7 @@ df:
         --errOutputDir=gs://$(gcs_bucket)/raycom/out/err/ \
         --bqSchema=gs://$(gcs_bucket)/raycom/schemas/$(bq_firebase_schema) \
         --bqOutputTable=$(gcp_project):raycom.firebase_rt \
+        --storageWriteApiTriggeringFrequencySec=$(bq_storageWriteApiTriggeringFrequencySec) \
         --avroSchema=gs://$(gcs_bucket)/raycom/schemas/dingoactions.avsc \
         --btInstanceId=$(bigtable_instance) \
         --btTableIdTall=bttall \
@@ -119,7 +130,8 @@ df:
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region) \
-        --workerZone=$(region)-$(workerZone)"
+        --workerZone=$(region)-$(workerZone) \
+        --isBasic=$(isBasic)"
 
 cancel:
 	@gcloud dataflow jobs cancel $(job) --region=$(region)
@@ -162,4 +174,4 @@ gcs_init:
 bq_init:
 	@-bq --location=US mk --dataset raycom
 
-.PHONY: df dfup cancel drain btcluster btinit btdata btclear btrelease pubsub_init gcs_init
+.PHONY: df dfup cancel drain btcluster btinit btdata btclear btrelease pubsub_init gcs_init build clean

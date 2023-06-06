@@ -5,6 +5,7 @@ import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.StreamingOptions;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryOptions;
 import org.apache.beam.sdk.options.Validation.Required;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.NestedValueProvider;
@@ -12,7 +13,7 @@ import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.runners.dataflow.options.DataflowWorkerLoggingOptions;
 
 public interface BindiegoStreamingOptions 
-        extends PipelineOptions, StreamingOptions, 
+        extends PipelineOptions, StreamingOptions, BigQueryOptions,
                 DataflowPipelineOptions, DataflowWorkerLoggingOptions {
     @Description("Topic of pubsub")
     @Default.String("projects/google.com:bin-wus-learning-center/topics/dingoactions")
@@ -83,7 +84,7 @@ public interface BindiegoStreamingOptions
     String getCsvDelimiter();
     void setCsvDelimiter(String value);
 
-    @Description("JSON file with BigQuery Schema description")
+    @Description("JSON file with BigQuery Schema description, GCS path")
     @Required
     ValueProvider<String> getBqSchema();
     void setBqSchema(ValueProvider<String> value);
@@ -187,4 +188,9 @@ public interface BindiegoStreamingOptions
     @Default.Boolean(false)
     Boolean getEsIsIgnoreInsecureSSL();
     void setEsIsIgnoreInsecureSSL(Boolean value);
+
+    @Description("Basic mode, will let you run this Firebase fundamental pipeline in one shot with real time events data ingestion to BQ only")
+    @Default.Boolean(false)
+    Boolean getIsBasic();
+    void setIsBasic(Boolean value);
 }

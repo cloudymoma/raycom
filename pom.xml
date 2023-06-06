@@ -52,6 +52,8 @@
     <gson.ver>2.10.1</gson.ver>
     <hadoop.version>3.3.4</hadoop.version>
     <nemo.version>0.4</nemo.version>
+    <cmn.io.ver>2.12.0</cmn.io.ver>
+    <cmn.lang3.ver>3.12.0</cmn.lang3.ver>
   </properties>
 
   <repositories>
@@ -550,6 +552,18 @@
         <groupId>com.google.code.gson</groupId>
         <artifactId>gson</artifactId>
         <version>${gson.ver}</version>
+    </dependency>
+
+    <!-- Apache stuff -->
+    <dependency>
+      <groupId>commons-io</groupId>
+      <artifactId>commons-io</artifactId>
+      <version>${cmn.io.ver}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>${cmn.lang3.ver}</version>
     </dependency>
   </dependencies>
 </project>

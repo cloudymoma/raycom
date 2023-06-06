@@ -2,7 +2,11 @@ package bindiego;
 
 import  bindiego.BindiegoStreamingOptions;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +21,8 @@ import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.util.Bytes;
+
+import com.google.common.base.Strings;
 
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableSchema;
@@ -35,6 +41,8 @@ import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.CreateDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.WriteDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
+import org.apache.beam.sdk.io.gcp.bigquery.TableRowJsonCoder;
+import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.FileBasedSink;
@@ -64,6 +72,8 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.DoFn.MultiOutputReceiver;
+import org.apache.beam.sdk.transforms.DoFn.ProcessContext;
+import org.apache.beam.sdk.transforms.DoFn.ProcessElement;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.windowing.Window;
@@ -91,6 +101,8 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.Coder.Context;
+import org.apache.beam.sdk.util.StreamUtils;
 import org.apache.avro.Schema;
 import org.apache.avro.file.CodecFactory;
 import org.apache.avro.generic.GenericData;
@@ -104,6 +116,7 @@ import org.codehaus.jackson.map.ObjectMapper;
 import bindiego.io.WindowedFilenamePolicy;
 import bindiego.utils.DurationUtils;
 import bindiego.utils.SchemaParser;
+import bindiego.utils.GCSUtils;
 import bindiego.io.ElasticsearchIO;
 
 public class BindiegoStreaming {
@@ -404,582 +417,709 @@ public class BindiegoStreaming {
             );
         */
 
-        // Read JDBC lookup table
-        final PCollectionView<Map<String, String>> lookupTable = 
-            p.apply("Read lookup table from JDBC data source", 
-                    JdbcIO.<KV<String, String>>read()
-                // .withDataSourceConfiguration(
-                .withDataSourceProviderFn(JdbcIO.PoolableDataSourceProvider.of(
-                    JdbcIO.DataSourceConfiguration.create(
-                        options.getJdbcClass(), options.getJdbcConn())
-                    .withUsername(options.getJdbcUsername())
-                    .withPassword(options.getJdbcPassword())))
-                .withQuery("select dim1, dim1_val from t_dim1;") // FIXME: hardcoded
-                .withCoder(KvCoder.of(StringUtf8Coder.of(),
-                    StringUtf8Coder.of())) // e.g. BigEndianIntegerCoder.of() for Integer
-                .withRowMapper(new JdbcIO.RowMapper<KV<String, String>>() {
-                    public KV<String, String> mapRow(ResultSet resultSet) throws Exception {
-                        return KV.of(resultSet.getString(1), resultSet.getString(2)); // e.g. resultSet.getInt(1)
-                    }
-                })
-            )
-            .apply("Produce broadcast view for lookup", View.<String, String>asMap());
-
         /* Raw data processing */
         PCollection<PubsubMessage> messages = p.apply("Read Pubsub Events", 
-            PubsubIO.readMessagesWithAttributesAndMessageId()
+            PubsubIO
+                .readMessages().fromSubscription(options.getSubscription()));
+                /*
+                .readMessagesWithAttributesAndMessageId()
                 .withIdAttribute(options.getMessageIdAttr())
                 // set event time from a message attribute, milliseconds since the Unix epoch
                 .withTimestampAttribute(options.getMessageTsAttr())
                 .fromSubscription(options.getSubscription()));
+                */
 
-        PCollectionTuple processedData = messages.apply("Extract CSV payload from pubsub message",
-            ParDo.of(new ExtractPayload(lookupTable))
-                .withOutputTags(STR_OUT, TupleTagList.of(STR_FAILURE_OUT))
-                .withSideInputs(lookupTable));
-            // this usually used with TextIO 
-            // .apply("Set event timestamp value", WithTimestamps.of(new SetTimestamp())); 
-
-        /* Realtime data analysis */
-        // HBase/BigTable or Elasticsearch
-        //
-        // Use HBase/BigTable as an example, since we could show both wide and tall schema for 
-        // window accumulating and disarding mode according to your specific scenario
-
-        /* Various outputs for detailed data */
-        /* 
-         * @desc Use a composite trigger
-         *   Combine
-         * - triggering every early firing period of processing time
-         * - util watermark passes
-         * - then triggering any time a late datum arrives
-         * - up to a garbage collection horizon of allowed lateness of event time
-         * - all with accumulation strategy turned on that specified in code
-         *
-         *   We should end up with timing for: EARLY, ON_TIME & LATE
-         */
-        /*
-        PCollection<String> healthData = processedData.get(STR_OUT)
-            .apply(options.getWindowSize() + " window for healthy data",
-                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
-                    .triggering(
-                        AfterEach.inOrder(
-                            Repeatedly.forever( 
-                                AfterProcessingTime.pastFirstElementInPane() 
-                                    // speculative result on a time basis
-                                    .plusDelayOf(DurationUtils.parseDuration(
-                                        options.getEarlyFiringPeriod()))
-                                .orFinally(AfterWatermark.pastEndOfWindow()),
-                            Repeatedly.forever(
-                                AfterPane.elementCountAtLeast( // FIXME: should use other triggers
-                                    options.getLateFiringCount().intValue()))
-                        )
-                    )
-                    .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
-                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY))
-            .apply("Append windowing information",
-                ParDo.of(new AppendWindowInfo()));
-        */
-
-        /* REVISIT: A terse approach */
-        PCollection<String> healthData = processedData.get(STR_OUT)
-            .apply(options.getWindowSize() + " window for healthy data",
-                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
-                    .triggering(
-                        AfterWatermark.pastEndOfWindow()
-                            .withEarlyFirings(
-                                AfterProcessingTime
-                                    .pastFirstElementInPane() 
-                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
-                            .withLateFirings(
-                                AfterPane.elementCountAtLeast(
-                                    options.getLateFiringCount().intValue()))
-                    )
-                    .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
-                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY))
-            .apply("Append windowing information",
-                ParDo.of(new AppendWindowInfo()));
-
-        // REVISIT: we may apply differnet window for error data?
-        PCollection<String> errData = processedData.get(STR_FAILURE_OUT)
-            .apply(options.getWindowSize() + " window for error data",
-                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
-
-        /* START - building realtime analytics */
-        // we use dim1 as key to do the analysis
-        // REVISIT: we applied the same windowing functions here, it could/should be different tho
-
-        // window/panes accumulating mode, good for tall table
-        processedData.get(STR_OUT)
-            .apply(options.getWindowSize() 
-                    + " window for healthy data in KV for real time analysis, accumulating mode",
-                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
-                    .triggering(
-                        AfterWatermark.pastEndOfWindow()
-                            .withEarlyFirings(
-                                AfterProcessingTime
-                                    .pastFirstElementInPane() 
-                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
-                            .withLateFirings(
-                                AfterPane.elementCountAtLeast(
-                                    options.getLateFiringCount().intValue()))
-                    )
-                    .accumulatingFiredPanes()
-                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY))
-            .apply("Produce KV for aggregation operations", // produce PCollection<KV<String, String>>
-                ParDo.of(new ProduceKv(options.getCsvDelimiter())))
-            .apply("group by dim1 for analysis", // produce PCollection<KV<String, Iterable<String>>>
-                GroupByKey.create())
-            .apply("Produce HBase/Bigtable tall table",
-                ParDo.of(new DoFn<KV<String, Iterable<String>>, Put>() {
-                    @ProcessElement
-                    public void processElement(ProcessContext ctx) {
-                        final long processTs = System.currentTimeMillis();
-
-                        // row key related value
-                        StringBuilder sb = new StringBuilder(ctx.element().getKey());
-
-                        // statistical data, choose the appropreate data types according to your case
-                        final byte[] stats_cf = Bytes.toBytes("stats");
-                        Integer count = 0;
-                        Integer sum = 0;
-                        Integer min = Integer.MAX_VALUE;
-                        Integer max = Integer.MIN_VALUE;
-                        Float avg = 0F;
-
-                        Iterable<String> csvLines = ctx.element().getValue();
-
-                        // i.e. "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
-                        for(String csvLine : csvLines) {
-                            String[] csvValues = csvLine.split(",");
-                            Integer metric = Integer.valueOf(csvValues[5]);
-
-                            ++count;
-
-                            sum += metric;
-
-                            if (min >  metric)
-                                min = metric;
-                            
-                            if (max < metric)
-                                max = metric;
+        if (!options.getIsBasic()) {
+            // Read JDBC lookup table
+            final PCollectionView<Map<String, String>> lookupTable = 
+                p.apply("Read lookup table from JDBC data source", 
+                        JdbcIO.<KV<String, String>>read()
+                    // .withDataSourceConfiguration(
+                    .withDataSourceProviderFn(JdbcIO.PoolableDataSourceProvider.of(
+                        JdbcIO.DataSourceConfiguration.create(
+                            options.getJdbcClass(), options.getJdbcConn())
+                        .withUsername(options.getJdbcUsername())
+                        .withPassword(options.getJdbcPassword())))
+                    .withQuery("select dim1, dim1_val from t_dim1;") // FIXME: hardcoded
+                    .withCoder(KvCoder.of(StringUtf8Coder.of(),
+                        StringUtf8Coder.of())) // e.g. BigEndianIntegerCoder.of() for Integer
+                    .withRowMapper(new JdbcIO.RowMapper<KV<String, String>>() {
+                        public KV<String, String> mapRow(ResultSet resultSet) throws Exception {
+                            return KV.of(resultSet.getString(1), resultSet.getString(2)); // e.g. resultSet.getInt(1)
                         }
+                    })
+                )
+                .apply("Produce broadcast view for lookup", View.<String, String>asMap());
 
-                        if (count > 0)
-                            avg = sum.floatValue() / count;
+                // Extact CSV data and join with lookup table
+                PCollectionTuple processedData = messages.apply("Extract CSV payload from pubsub message",
+                    ParDo.of(new ExtractPayload(lookupTable))
+                        .withOutputTags(STR_OUT, TupleTagList.of(STR_FAILURE_OUT))
+                        .withSideInputs(lookupTable));  
 
-                        ctx.output(
-                            new Put(
-                                Bytes.toBytes(sb.append('#')
-                                    .append(Long.MAX_VALUE - processTs).toString())
-                            ).addColumn(stats_cf, Bytes.toBytes("num_records"), processTs,
-                                Bytes.toBytes(count.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("sum"), processTs,
-                                Bytes.toBytes(sum.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("max"), processTs,
-                                Bytes.toBytes(max.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("min"), processTs,
-                                Bytes.toBytes(min.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("avg"), processTs,
-                                Bytes.toBytes(avg.toString()))
-                        );
-                    }}))
-                .apply("Append window information",
-                    ParDo.of(new DoFn<Put, Mutation>() {
+                /* REVISIT: A terse approach */
+                PCollection<String> healthData = processedData.get(STR_OUT)
+                    .apply(options.getWindowSize() + " window for healthy data",
+                        Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                            .triggering(
+                                AfterWatermark.pastEndOfWindow()
+                                    .withEarlyFirings(
+                                        AfterProcessingTime
+                                            .pastFirstElementInPane() 
+                                            .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                                    .withLateFirings(
+                                        AfterPane.elementCountAtLeast(
+                                            options.getLateFiringCount().intValue()))
+                            )
+                            .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
+                            .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                                ClosingBehavior.FIRE_IF_NON_EMPTY))
+                    .apply("Append windowing information",
+                        ParDo.of(new AppendWindowInfo()));
+
+            // REVISIT: we may apply differnet window for error data?
+            PCollection<String> errData = processedData.get(STR_FAILURE_OUT)
+                .apply(options.getWindowSize() + " window for error data",
+                    Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize()))));
+
+            /* START - building realtime analytics */
+            // we use dim1 as key to do the analysis
+            // REVISIT: we applied the same windowing functions here, it could/should be different tho
+
+            // window/panes accumulating mode, good for tall table
+            processedData.get(STR_OUT)
+                .apply(options.getWindowSize() 
+                        + " window for healthy data in KV for real time analysis, accumulating mode",
+                    Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                        .triggering(
+                            AfterWatermark.pastEndOfWindow()
+                                .withEarlyFirings(
+                                    AfterProcessingTime
+                                        .pastFirstElementInPane() 
+                                        .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                                .withLateFirings(
+                                    AfterPane.elementCountAtLeast(
+                                        options.getLateFiringCount().intValue()))
+                        )
+                        .accumulatingFiredPanes()
+                        .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                            ClosingBehavior.FIRE_IF_NON_EMPTY))
+                .apply("Produce KV for aggregation operations", // produce PCollection<KV<String, String>>
+                    ParDo.of(new ProduceKv(options.getCsvDelimiter())))
+                .apply("group by dim1 for analysis", // produce PCollection<KV<String, Iterable<String>>>
+                    GroupByKey.create())
+                .apply("Produce HBase/Bigtable tall table",
+                    ParDo.of(new DoFn<KV<String, Iterable<String>>, Put>() {
+                        @ProcessElement
+                        public void processElement(ProcessContext ctx) {
+                            final long processTs = System.currentTimeMillis();
+
+                            // row key related value
+                            StringBuilder sb = new StringBuilder(ctx.element().getKey());
+
+                            // statistical data, choose the appropreate data types according to your case
+                            final byte[] stats_cf = Bytes.toBytes("stats");
+                            Integer count = 0;
+                            Integer sum = 0;
+                            Integer min = Integer.MAX_VALUE;
+                            Integer max = Integer.MIN_VALUE;
+                            Float avg = 0F;
+
+                            Iterable<String> csvLines = ctx.element().getValue();
+
+                            // i.e. "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
+                            for(String csvLine : csvLines) {
+                                String[] csvValues = csvLine.split(",");
+                                Integer metric = Integer.valueOf(csvValues[5]);
+
+                                ++count;
+
+                                sum += metric;
+
+                                if (min >  metric)
+                                    min = metric;
+                                
+                                if (max < metric)
+                                    max = metric;
+                            }
+
+                            if (count > 0)
+                                avg = sum.floatValue() / count;
+
+                            ctx.output(
+                                new Put(
+                                    Bytes.toBytes(sb.append('#')
+                                        .append(Long.MAX_VALUE - processTs).toString())
+                                ).addColumn(stats_cf, Bytes.toBytes("num_records"), processTs,
+                                    Bytes.toBytes(count.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("sum"), processTs,
+                                    Bytes.toBytes(sum.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("max"), processTs,
+                                    Bytes.toBytes(max.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("min"), processTs,
+                                    Bytes.toBytes(min.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("avg"), processTs,
+                                    Bytes.toBytes(avg.toString()))
+                            );
+                        }}))
+                    .apply("Append window information",
+                        ParDo.of(new DoFn<Put, Mutation>() {
+                            @ProcessElement
+                            public void processElement(ProcessContext ctx, IntervalWindow window)
+                                throws IllegalArgumentException {
+
+                                final byte[] win_cf = Bytes.toBytes("window_info");
+
+                                Put p = ctx.element();
+
+                                p.addColumn(win_cf, Bytes.toBytes("window"),
+                                        Bytes.toBytes(window.toString()))
+                                    .addColumn(win_cf, Bytes.toBytes("pane"),
+                                        Bytes.toBytes(ctx.pane().toString()))
+                                    .addColumn(win_cf, Bytes.toBytes("pane_idx"),
+                                        Bytes.toBytes(String.valueOf(ctx.pane().getIndex())))
+                                    .addColumn(win_cf, Bytes.toBytes("pane_nonspeculative_idx"),
+                                        Bytes.toBytes(String.valueOf(ctx.pane().getNonSpeculativeIndex())))
+                                    .addColumn(win_cf, Bytes.toBytes("is_first"),
+                                        Bytes.toBytes(String.valueOf(ctx.pane().isFirst())))
+                                    .addColumn(win_cf, Bytes.toBytes("is_last"),
+                                        Bytes.toBytes(String.valueOf(ctx.pane().isLast())))
+                                    .addColumn(win_cf, Bytes.toBytes("timing"),
+                                        Bytes.toBytes(ctx.pane().getTiming().toString()))
+                                    .addColumn(win_cf, Bytes.toBytes("win_start_ts"),
+                                        Bytes.toBytes(String.valueOf(window.start().getMillis())))
+                                    .addColumn(win_cf, Bytes.toBytes("win_end_ts"),
+                                        Bytes.toBytes(String.valueOf(window.end().getMillis())));
+
+                                ctx.output(p);
+                            }}))
+                    .apply("Insert into Bigtable, tall schema",
+                        CloudBigtableIO.writeToTable(
+                            new CloudBigtableTableConfiguration.Builder()
+                                .withProjectId(options.getProject())
+                                .withInstanceId(options.getBtInstanceId())
+                                .withTableId(options.getBtTableIdTall())
+                                .build()));
+
+                    /*
+                */
+
+            // window/panes disgarding mode, good for wide table
+            processedData.get(STR_OUT)
+                .apply(options.getWindowSize() 
+                        + " window for healthy data in KV for real time analysis, disgarding mode",
+                    Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                        .triggering(
+                            AfterWatermark.pastEndOfWindow()
+                                .withEarlyFirings(
+                                    AfterProcessingTime
+                                        .pastFirstElementInPane() 
+                                        .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                                .withLateFirings(
+                                    AfterPane.elementCountAtLeast(
+                                        options.getLateFiringCount().intValue()))
+                        )
+                        .discardingFiredPanes() 
+                        .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                            ClosingBehavior.FIRE_IF_NON_EMPTY))
+                .apply("Produce KV for aggregation operations", // produce PCollection<KV<String, String>>
+                    ParDo.of(new ProduceKv(options.getCsvDelimiter())))
+                .apply("group by dim1 for analysis", // produce PCollection<KV<String, Iterable<String>>>
+                    GroupByKey.create())
+                .apply("Produce HBase/Bigtable wide table, window/pane info append to column names",
+                    ParDo.of(new DoFn<KV<String, Iterable<String>>, Mutation>() {
                         @ProcessElement
                         public void processElement(ProcessContext ctx, IntervalWindow window)
-                            throws IllegalArgumentException {
+                                throws IllegalArgumentException {
+                            final long processTs = System.currentTimeMillis();
 
-                            final byte[] win_cf = Bytes.toBytes("window_info");
+                            // row key related value
+                            StringBuilder sb = new StringBuilder(ctx.element().getKey());
 
-                            Put p = ctx.element();
+                            // statistical data, choose the appropreate data types according to your case
+                            final byte[] stats_cf = Bytes.toBytes("stats");
+                            Integer count = 0;
+                            Integer sum = 0;
+                            Integer min = Integer.MAX_VALUE;
+                            Integer max = Integer.MIN_VALUE;
+                            Float avg = 0F;
 
-                            p.addColumn(win_cf, Bytes.toBytes("window"),
-                                    Bytes.toBytes(window.toString()))
-                                .addColumn(win_cf, Bytes.toBytes("pane"),
-                                    Bytes.toBytes(ctx.pane().toString()))
-                                .addColumn(win_cf, Bytes.toBytes("pane_idx"),
-                                    Bytes.toBytes(String.valueOf(ctx.pane().getIndex())))
-                                .addColumn(win_cf, Bytes.toBytes("pane_nonspeculative_idx"),
-                                    Bytes.toBytes(String.valueOf(ctx.pane().getNonSpeculativeIndex())))
-                                .addColumn(win_cf, Bytes.toBytes("is_first"),
-                                    Bytes.toBytes(String.valueOf(ctx.pane().isFirst())))
-                                .addColumn(win_cf, Bytes.toBytes("is_last"),
-                                    Bytes.toBytes(String.valueOf(ctx.pane().isLast())))
-                                .addColumn(win_cf, Bytes.toBytes("timing"),
-                                    Bytes.toBytes(ctx.pane().getTiming().toString()))
-                                .addColumn(win_cf, Bytes.toBytes("win_start_ts"),
-                                    Bytes.toBytes(String.valueOf(window.start().getMillis())))
-                                .addColumn(win_cf, Bytes.toBytes("win_end_ts"),
-                                    Bytes.toBytes(String.valueOf(window.end().getMillis())));
+                            Iterable<String> csvLines = ctx.element().getValue();
 
-                            ctx.output(p);
+                            // i.e. "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
+                            for(String csvLine : csvLines) {
+                                String[] csvValues = csvLine.split(",");
+                                Integer metric = Integer.valueOf(csvValues[5]);
+
+                                ++count;
+
+                                sum += metric;
+
+                                if (min >  metric)
+                                    min = metric;
+                                
+                                if (max < metric)
+                                    max = metric;
+                            }
+
+                            if (count > 0)
+                                avg = sum.floatValue() / count;
+
+                            String pane_idx_str = String.valueOf(ctx.pane().getIndex());
+
+                            ctx.output(
+                                new Put(
+                                    Bytes.toBytes(sb.append('#')
+                                        .append(String.valueOf(window.start().getMillis()))
+                                        .append('#')
+                                        .append(String.valueOf(window.end().getMillis())).toString())
+                                ).addColumn(stats_cf, Bytes.toBytes("num_records#" + pane_idx_str), 
+                                    processTs,
+                                    Bytes.toBytes(count.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("sum#" + pane_idx_str), 
+                                    processTs,
+                                    Bytes.toBytes(sum.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("max#" + pane_idx_str), 
+                                    processTs,
+                                    Bytes.toBytes(max.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("min#" + pane_idx_str), 
+                                    processTs,
+                                    Bytes.toBytes(min.toString()))
+                                .addColumn(stats_cf, Bytes.toBytes("avg#" + pane_idx_str), 
+                                    processTs,
+                                    Bytes.toBytes(avg.toString()))
+                            );
                         }}))
-                .apply("Insert into Bigtable, tall schema",
-                    CloudBigtableIO.writeToTable(
-                        new CloudBigtableTableConfiguration.Builder()
-                            .withProjectId(options.getProject())
-                            .withInstanceId(options.getBtInstanceId())
-                            .withTableId(options.getBtTableIdTall())
-                            .build()));
+                    .apply("Insert into Bigtable, wide schema",
+                        CloudBigtableIO.writeToTable(
+                            new CloudBigtableTableConfiguration.Builder()
+                                .withProjectId(options.getProject())
+                                .withInstanceId(options.getBtInstanceId())
+                                .withTableId(options.getBtTableIdWide())
+                                .build()));
 
-                /*
+            /* END - building realtime analytics */
+
+            /* Elasticsearch */
+            processedData.get(STR_OUT)
+                .apply(options.getWindowSize() + " window for healthy data",
+                    Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                        .triggering(
+                            AfterWatermark.pastEndOfWindow()
+                                .withEarlyFirings(
+                                    AfterProcessingTime
+                                        .pastFirstElementInPane() 
+                                        .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                                .withLateFirings(
+                                    AfterPane.elementCountAtLeast(
+                                        options.getLateFiringCount().intValue()))
+                        )
+                        .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
+                        .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                            ClosingBehavior.FIRE_IF_NON_EMPTY))
+                .apply("Prepare Elasticsearch Json data",
+                    ParDo.of(new DoFn<String, String>() {
+                        private ObjectMapper mapper;
+
+                        @Setup 
+                        public void setup() {
+                            mapper = new ObjectMapper();
+                        }
+
+                        @ProcessElement
+                        public void processElement(ProcessContext ctx) throws Exception {
+                            // "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
+                            String[] csvData = ctx.element().split(",");
+                            Map<String, Object> jsonMap = new HashMap<>();
+                            // FIXME: hardcoded
+                            for (int i = 0; i < csvData.length; ++i) {
+                                switch(i) {
+                                    case 0:
+                                        // jsonMap.put("@timestamp", new Date(Long.parseLong(csvData[i])));
+                                        jsonMap.put("@timestamp", 
+                                            new java.sql.Timestamp(Long.parseLong(csvData[i])));
+                                        break;
+                                    case 1:
+                                        jsonMap.put("thread_id", csvData[i]);
+                                        break;
+                                    case 2:
+                                        jsonMap.put("thread_name", csvData[i]);
+                                        break;
+                                    case 3:
+                                        jsonMap.put("seq", Long.valueOf(csvData[i]));
+                                        break;
+                                    case 4:
+                                        jsonMap.put("dim1", csvData[i]);
+                                        break;
+                                    case 5:
+                                        jsonMap.put("metrics1", Long.valueOf(csvData[i]));
+                                        break;
+                                    case 6:
+                                        // jsonMap.put("process_ts", new Date(Long.parseLong(csvData[i])));
+                                        jsonMap.put("process_ts", 
+                                            new java.sql.Timestamp(Long.parseLong(csvData[i])));
+                                        break;
+                                    case 7:
+                                        jsonMap.put("dim1_val", csvData[i]);
+                                        break;
+                                    default:
+                                }
+                            }
+
+                            String json = mapper.writeValueAsString(jsonMap);
+                            ctx.output(json);
+                        }
+                    }))
+                .apply("Append data to Elasticsearch",
+                    ElasticsearchIO.append()
+                        .withMaxBatchSize(options.getEsMaxBatchSize())
+                        .withMaxBatchSizeBytes(options.getEsMaxBatchBytes())
+                        .withConnectionConf(
+                            ElasticsearchIO.ConnectionConf.create(
+                                options.getEsHost(),
+                                options.getEsIndex())
+                                    .withUsername(options.getEsUser())
+                                    .withPassword(options.getEsPass())
+                                    .withNumThread(options.getEsNumThread())
+                                    .withIngnoreInsecureSSL(options.getEsIsIgnoreInsecureSSL().booleanValue()))
+                                    //.withTrustSelfSignedCerts(true)) // false by default
+                        .withRetryConf(
+                            ElasticsearchIO.RetryConf.create(6, Duration.standardSeconds(60))));
+            /* END - Elasticsearch */
+
+            healthData.apply("Write windowed healthy CSV files", 
+                TextIO.write()
+                    .withNumShards(options.getNumShards())
+                    .withWindowedWrites()
+                    .to(
+                        new WindowedFilenamePolicy(
+                            options.getOutputDir(),
+                            options.getFilenamePrefix(),
+                            options.getOutputShardTemplate(),
+                            options.getCsvFilenameSuffix()
+                        ))
+                    .withTempDirectory(
+                        FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())));
+
+            healthData.apply("Prepare table data for BigQuery",
+                ParDo.of(
+                    new DoFn<String, TableRow>() {
+                        @ProcessElement
+                        public void processElement(ProcessContext ctx) {
+                            String dataStr = ctx.element();
+
+                            // REVISIT: damn ugly here, hard coded table schema
+                            String[] cols = (
+                                    "event_ts,thread_id,thread_name,seq,dim1,metrics1" 
+                                    + ",process_ts,dim1_val"
+                                    + ",window,pane_info,pane_idx,pane_nonspeculative_idx"
+                                    + ",is_first,is_last,pane_timing,pane_event_ts"
+                                ).split(",");
+
+                            // REFISIT: options is NOT serializable, make a class for this transform
+                            // String[] csvData = dataStr.split(options.getCsvDelimiter()); 
+                            String[] csvData = dataStr.split(","); 
+
+                            TableRow row = new TableRow();
+
+                            // for god sake safety purpose
+                            int loopCtr = 
+                                cols.length <= csvData.length ? cols.length : csvData.length;
+
+                            for (int i = 0; i < loopCtr; ++i) {
+                                // deal with non-string field in BQ
+                                switch (i) {
+                                    case 0: case 6:
+                                    case 15:
+                                        row.set(cols[i], 
+                                            TimeUnit.MILLISECONDS.toSeconds(
+                                                Long.parseLong(csvData[i])));
+                                        // row.set(cols[i], Long.parseLong(csvData[i]));
+                                        // row.set(cols[i], Long.parseLong(csvData[i])/1000);
+                                        // row.set(cols[i], Integer.parseInt(csvData[i]));
+                                        break;
+                                    case 10: case 11:
+                                        row.set(cols[i], Long.parseLong(csvData[i]));
+                                        break;
+                                    case 3: case 5:
+                                        row.set(cols[i], Integer.parseInt(csvData[i]));
+                                        break;
+                                    case 12: case 13:
+                                        row.set(cols[i], Boolean.parseBoolean(csvData[i]));
+                                        break;
+                                    default:
+                                        row.set(cols[i], csvData[i]);
+                                }
+                            } // End of dirty code
+
+                            ctx.output(row);
+                        }
+                    }
+                ))
+                .apply("Insert into BigQuery",
+                    BigQueryIO.writeTableRows()
+                        .withSchema(
+                            NestedValueProvider.of(
+                                options.getBqSchema(),
+                                new SerializableFunction<String, TableSchema>() {
+                                    @Override
+                                    public TableSchema apply(String jsonPath) {
+                                        TableSchema tableSchema = new TableSchema();
+                                        List<TableFieldSchema> fields = new ArrayList<>();
+                                        SchemaParser schemaParser = new SchemaParser();
+                                        JSONObject jsonSchema;
+
+                                        try {
+                                            jsonSchema = schemaParser.parseSchema(jsonPath);
+
+                                            JSONArray bqSchemaJsonArray =
+                                                jsonSchema.getJSONArray(BIGQUERY_SCHEMA);
+
+                                            for (int i = 0; i < bqSchemaJsonArray.length(); i++) {
+                                                JSONObject inputField = bqSchemaJsonArray.getJSONObject(i);
+                                                TableFieldSchema field =
+                                                    new TableFieldSchema()
+                                                        .setName(inputField.getString(NAME))
+                                                        .setType(inputField.getString(TYPE));
+                                                if (inputField.has(MODE)) {
+                                                    field.setMode(inputField.getString(MODE));
+                                                }
+
+                                                fields.add(field);
+                                            }
+                                            tableSchema.setFields(fields);
+                                        } catch (Exception e) {
+                                            throw new RuntimeException(e);
+                                        }
+                                        return tableSchema;
+                                    }
+                                }))
+                            .withTimePartitioning(
+                                new TimePartitioning().setField("event_ts")
+                                    .setType("DAY")
+                                    .setExpirationMs(null)
+                            )
+                            .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
+                            .withWriteDisposition(WriteDisposition.WRITE_APPEND)
+                            .to(options.getBqOutputTable())
+                            .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                            .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
+                            .withCustomGcsTempLocation(options.getGcsTempLocation()));
+
+            // Assume dealing with CSV payload, so basically convert CSV to Avro
+            SchemaParser schemaParser = new SchemaParser();
+            String avroSchemaJson = schemaParser.getAvroSchema(options.getAvroSchema().get());
+            Schema avroSchema = new Schema.Parser().parse(avroSchemaJson);
+
+            healthData.apply("Prepare Avro data",
+                    ParDo.of(new ConvertCsvToAvro(avroSchemaJson, options.getCsvDelimiter())))
+                .setCoder(AvroCoder.of(GenericRecord.class, avroSchema))
+                // .apply("Write Avro formatted data", AvroIO.writeGenericRecords(avroSchemaJson)
+                .apply("Write Avro formatted data", AvroIO.writeGenericRecords(avroSchema)
+                    .to(
+                        new WindowedFilenamePolicy(
+                            options.getOutputDir(),
+                            options.getFilenamePrefix(),
+                            options.getOutputShardTemplate(),
+                            options.getAvroFilenameSuffix()
+                        ))
+                    .withWindowedWrites()
+                    .withNumShards(options.getNumShards())
+                    .withTempDirectory(
+                        FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())
+                    )
+                    .withCodec(CodecFactory.snappyCodec()));
+            /*
+                    .withTempDirectory(NestedValueProvider.of(
+                        options.getGcsTempLocation(),
+                        (SerializableFunction<String, ResourceId>) input ->
+                            FileBasedSink.convertToFileResourceIfPossible(input)
+                    ))
             */
 
-        // window/panes disgarding mode, good for wide table
-        processedData.get(STR_OUT)
-            .apply(options.getWindowSize() 
-                    + " window for healthy data in KV for real time analysis, disgarding mode",
-                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
-                    .triggering(
-                        AfterWatermark.pastEndOfWindow()
-                            .withEarlyFirings(
-                                AfterProcessingTime
-                                    .pastFirstElementInPane() 
-                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
-                            .withLateFirings(
-                                AfterPane.elementCountAtLeast(
-                                    options.getLateFiringCount().intValue()))
-                    )
-                    .discardingFiredPanes() 
-                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY))
-            .apply("Produce KV for aggregation operations", // produce PCollection<KV<String, String>>
-                ParDo.of(new ProduceKv(options.getCsvDelimiter())))
-            .apply("group by dim1 for analysis", // produce PCollection<KV<String, Iterable<String>>>
-                GroupByKey.create())
-            .apply("Produce HBase/Bigtable wide table, window/pane info append to column names",
-                ParDo.of(new DoFn<KV<String, Iterable<String>>, Mutation>() {
+            errData.apply("Write windowed error data in CSV format", 
+                TextIO.write()
+                    .withNumShards(options.getNumShards())
+                    .withWindowedWrites()
+                    .to(
+                        new WindowedFilenamePolicy(
+                            options.getErrOutputDir(),
+                            options.getFilenamePrefix(),
+                            options.getOutputShardTemplate(),
+                            options.getCsvFilenameSuffix()
+                        ))
+                    .withTempDirectory(
+                        FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())));
+
+            p.run();
+            //p.run().waitUntilFinish();
+        } else { // end if BasicMode
+            PCollectionTuple strData = messages.apply("Extract pubsub messages",
+                ParDo.of(new DoFn<PubsubMessage,String>() {
                     @ProcessElement
-                    public void processElement(ProcessContext ctx, IntervalWindow window)
-                             throws IllegalArgumentException {
-                        final long processTs = System.currentTimeMillis();
+                    public void processElement(ProcessContext ctx, MultiOutputReceiver r) 
+                            throws IllegalArgumentException {
 
-                        // row key related value
-                        StringBuilder sb = new StringBuilder(ctx.element().getKey());
+                        String payload = null; // Firebase Json data
 
-                        // statistical data, choose the appropreate data types according to your case
-                        final byte[] stats_cf = Bytes.toBytes("stats");
-                        Integer count = 0;
-                        Integer sum = 0;
-                        Integer min = Integer.MAX_VALUE;
-                        Integer max = Integer.MIN_VALUE;
-                        Float avg = 0F;
+                        try {
+                            PubsubMessage psmsg = ctx.element();
+                            payload = new String(psmsg.getPayload(), StandardCharsets.UTF_8);
 
-                        Iterable<String> csvLines = ctx.element().getValue();
+                            logger.debug("Extracted payload: " + payload);
+                            r.get(STR_OUT).output(payload);
+                        } catch (Exception ex) {
+                            if (null == payload)
+                                payload = "Failed to extract pubsub payload";
 
-                        // i.e. "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
-                        for(String csvLine : csvLines) {
-                            String[] csvValues = csvLine.split(",");
-                            Integer metric = Integer.valueOf(csvValues[5]);
+                            r.get(STR_FAILURE_OUT).output(payload);
 
-                            ++count;
-
-                            sum += metric;
-
-                            if (min >  metric)
-                                min = metric;
-                            
-                            if (max < metric)
-                                max = metric;
+                            logger.error("Failed extract pubsub message", ex);
                         }
-
-                        if (count > 0)
-                            avg = sum.floatValue() / count;
-
-                        String pane_idx_str = String.valueOf(ctx.pane().getIndex());
-
-                        ctx.output(
-                            new Put(
-                                Bytes.toBytes(sb.append('#')
-                                    .append(String.valueOf(window.start().getMillis()))
-                                    .append('#')
-                                    .append(String.valueOf(window.end().getMillis())).toString())
-                            ).addColumn(stats_cf, Bytes.toBytes("num_records#" + pane_idx_str), 
-                                processTs,
-                                Bytes.toBytes(count.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("sum#" + pane_idx_str), 
-                                processTs,
-                                Bytes.toBytes(sum.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("max#" + pane_idx_str), 
-                                processTs,
-                                Bytes.toBytes(max.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("min#" + pane_idx_str), 
-                                processTs,
-                                Bytes.toBytes(min.toString()))
-                            .addColumn(stats_cf, Bytes.toBytes("avg#" + pane_idx_str), 
-                                processTs,
-                                Bytes.toBytes(avg.toString()))
-                        );
-                    }}))
-                .apply("Insert into Bigtable, wide schema",
-                    CloudBigtableIO.writeToTable(
-                        new CloudBigtableTableConfiguration.Builder()
-                            .withProjectId(options.getProject())
-                            .withInstanceId(options.getBtInstanceId())
-                            .withTableId(options.getBtTableIdWide())
-                            .build()));
-
-        /* END - building realtime analytics */
-
-        /* Elasticsearch */
-        processedData.get(STR_OUT)
-            .apply(options.getWindowSize() + " window for healthy data",
-                Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
-                    .triggering(
-                        AfterWatermark.pastEndOfWindow()
-                            .withEarlyFirings(
-                                AfterProcessingTime
-                                    .pastFirstElementInPane() 
-                                    .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
-                            .withLateFirings(
-                                AfterPane.elementCountAtLeast(
-                                    options.getLateFiringCount().intValue()))
-                    )
-                    .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
-                    .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                        ClosingBehavior.FIRE_IF_NON_EMPTY))
-            .apply("Prepare Elasticsearch Json data",
-                ParDo.of(new DoFn<String, String>() {
-                    private ObjectMapper mapper;
-
-                    @Setup 
-                    public void setup() {
-                        mapper = new ObjectMapper();
                     }
+                }).withOutputTags(STR_OUT, TupleTagList.of(STR_FAILURE_OUT))
+            );
 
-                    @ProcessElement
-                    public void processElement(ProcessContext ctx) throws Exception {
-                        // "event_ts,thread_id,thread_name,seq,dim1,metrics1,process_ts,dim1_val"
-                        String[] csvData = ctx.element().split(",");
-                        Map<String, Object> jsonMap = new HashMap<>();
-                        // FIXME: hardcoded
-                        for (int i = 0; i < csvData.length; ++i) {
-                            switch(i) {
-                                case 0:
-                                    // jsonMap.put("@timestamp", new Date(Long.parseLong(csvData[i])));
-                                    jsonMap.put("@timestamp", 
-                                        new java.sql.Timestamp(Long.parseLong(csvData[i])));
-                                    break;
-                                case 1:
-                                    jsonMap.put("thread_id", csvData[i]);
-                                    break;
-                                case 2:
-                                    jsonMap.put("thread_name", csvData[i]);
-                                    break;
-                                case 3:
-                                    jsonMap.put("seq", Long.valueOf(csvData[i]));
-                                    break;
-                                case 4:
-                                    jsonMap.put("dim1", csvData[i]);
-                                    break;
-                                case 5:
-                                    jsonMap.put("metrics1", Long.valueOf(csvData[i]));
-                                    break;
-                                case 6:
-                                    // jsonMap.put("process_ts", new Date(Long.parseLong(csvData[i])));
-                                    jsonMap.put("process_ts", 
-                                        new java.sql.Timestamp(Long.parseLong(csvData[i])));
-                                    break;
-                                case 7:
-                                    jsonMap.put("dim1_val", csvData[i]);
-                                    break;
-                                default:
-                            }
-                        }
-
-                        String json = mapper.writeValueAsString(jsonMap);
-                        ctx.output(json);
-                    }
-                }))
-            .apply("Append data to Elasticsearch",
-                ElasticsearchIO.append()
-                    .withMaxBatchSize(options.getEsMaxBatchSize())
-                    .withMaxBatchSizeBytes(options.getEsMaxBatchBytes())
-                    .withConnectionConf(
-                        ElasticsearchIO.ConnectionConf.create(
-                            options.getEsHost(),
-                            options.getEsIndex())
-                                .withUsername(options.getEsUser())
-                                .withPassword(options.getEsPass())
-                                .withNumThread(options.getEsNumThread())
-                                .withIngnoreInsecureSSL(options.getEsIsIgnoreInsecureSSL().booleanValue()))
-                                //.withTrustSelfSignedCerts(true)) // false by default
-                    .withRetryConf(
-                        ElasticsearchIO.RetryConf.create(6, Duration.standardSeconds(60))));
-        /* END - Elasticsearch */
-
-        healthData.apply("Write windowed healthy CSV files", 
-            TextIO.write()
-                .withNumShards(options.getNumShards())
-                .withWindowedWrites()
-                .to(
-                    new WindowedFilenamePolicy(
-                        options.getOutputDir(),
-                        options.getFilenamePrefix(),
-                        options.getOutputShardTemplate(),
-                        options.getCsvFilenameSuffix()
-                    ))
-                .withTempDirectory(
-                    FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())));
-
-        healthData.apply("Prepare table data for BigQuery",
-            ParDo.of(
-                new DoFn<String, TableRow>() {
-                    @ProcessElement
-                    public void processElement(ProcessContext ctx) {
-                        String dataStr = ctx.element();
-
-                        // REVISIT: damn ugly here, hard coded table schema
-                        String[] cols = (
-                                "event_ts,thread_id,thread_name,seq,dim1,metrics1" 
-                                + ",process_ts,dim1_val"
-                                + ",window,pane_info,pane_idx,pane_nonspeculative_idx"
-                                + ",is_first,is_last,pane_timing,pane_event_ts"
-                            ).split(",");
-
-                        // REFISIT: options is NOT serializable, make a class for this transform
-                        // String[] csvData = dataStr.split(options.getCsvDelimiter()); 
-                        String[] csvData = dataStr.split(","); 
-
-                        TableRow row = new TableRow();
-
-                        // for god sake safety purpose
-                        int loopCtr = 
-                            cols.length <= csvData.length ? cols.length : csvData.length;
-
-                        for (int i = 0; i < loopCtr; ++i) {
-                            // deal with non-string field in BQ
-                            switch (i) {
-                                case 0: case 6:
-                                case 15:
-                                    row.set(cols[i], 
-                                        TimeUnit.MILLISECONDS.toSeconds(
-                                            Long.parseLong(csvData[i])));
-                                    // row.set(cols[i], Long.parseLong(csvData[i]));
-                                    // row.set(cols[i], Long.parseLong(csvData[i])/1000);
-                                    // row.set(cols[i], Integer.parseInt(csvData[i]));
-                                    break;
-                                case 10: case 11:
-                                    row.set(cols[i], Long.parseLong(csvData[i]));
-                                    break;
-                                case 3: case 5:
-                                    row.set(cols[i], Integer.parseInt(csvData[i]));
-                                    break;
-                                case 12: case 13:
-                                    row.set(cols[i], Boolean.parseBoolean(csvData[i]));
-                                    break;
-                                default:
-                                    row.set(cols[i], csvData[i]);
-                            }
-                        } // End of dirty code
-
-                        ctx.output(row);
-                    }
-                }
-            ))
-            .apply("Insert into BigQuery",
-                BigQueryIO.writeTableRows()
-                    .withSchema(
-                        NestedValueProvider.of(
-                            options.getBqSchema(),
-                            new SerializableFunction<String, TableSchema>() {
-                                @Override
-                                public TableSchema apply(String jsonPath) {
-                                    TableSchema tableSchema = new TableSchema();
-                                    List<TableFieldSchema> fields = new ArrayList<>();
-                                    SchemaParser schemaParser = new SchemaParser();
-                                    JSONObject jsonSchema;
-
-                                    try {
-                                        jsonSchema = schemaParser.parseSchema(jsonPath);
-
-                                        JSONArray bqSchemaJsonArray =
-                                            jsonSchema.getJSONArray(BIGQUERY_SCHEMA);
-
-                                        for (int i = 0; i < bqSchemaJsonArray.length(); i++) {
-                                            JSONObject inputField = bqSchemaJsonArray.getJSONObject(i);
-                                            TableFieldSchema field =
-                                                new TableFieldSchema()
-                                                    .setName(inputField.getString(NAME))
-                                                    .setType(inputField.getString(TYPE));
-                                            if (inputField.has(MODE)) {
-                                                field.setMode(inputField.getString(MODE));
-                                            }
-
-                                            fields.add(field);
-                                        }
-                                        tableSchema.setFields(fields);
-                                    } catch (Exception e) {
-                                        throw new RuntimeException(e);
-                                    }
-                                    return tableSchema;
-                                }
-                            }))
-                        .withTimePartitioning(
-                            new TimePartitioning().setField("event_ts")
-                                .setType("DAY")
-                                .setExpirationMs(null)
+            PCollection<TableRow> bqData = strData.get(STR_OUT)
+                /*
+                .apply(options.getWindowSize() + " window for bounded data",
+                    Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
+                        .triggering(
+                            AfterWatermark.pastEndOfWindow()
+                                .withEarlyFirings(
+                                    AfterProcessingTime
+                                        .pastFirstElementInPane() 
+                                        .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
+                                .withLateFirings(
+                                    AfterPane.elementCountAtLeast(
+                                        options.getLateFiringCount().intValue()))
                         )
-                        .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
-                        .withWriteDisposition(WriteDisposition.WRITE_APPEND)
-                        .to(options.getBqOutputTable())
-                        .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                        .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
-                        .withCustomGcsTempLocation(options.getGcsTempLocation()));
+                        .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
+                        .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
+                            ClosingBehavior.FIRE_IF_NON_EMPTY))
+                */
+                .apply("Decode json str to Bigquery TableRow",
+                    ParDo.of(new DoFn<String, TableRow>() {
+                        @ProcessElement
+                        public void processElement(ProcessContext ctx) {
+                            String dataStr = ctx.element();
 
-        // Assume dealing with CSV payload, so basically convert CSV to Avro
-        SchemaParser schemaParser = new SchemaParser();
-        String avroSchemaJson = schemaParser.getAvroSchema(options.getAvroSchema().get());
-        Schema avroSchema = new Schema.Parser().parse(avroSchemaJson);
+                            TableRow row = new TableRow();
 
-        healthData.apply("Prepare Avro data",
-                ParDo.of(new ConvertCsvToAvro(avroSchemaJson, options.getCsvDelimiter())))
-            .setCoder(AvroCoder.of(GenericRecord.class, avroSchema))
-            // .apply("Write Avro formatted data", AvroIO.writeGenericRecords(avroSchemaJson)
-            .apply("Write Avro formatted data", AvroIO.writeGenericRecords(avroSchema)
-                .to(
-                    new WindowedFilenamePolicy(
-                        options.getOutputDir(),
-                        options.getFilenamePrefix(),
-                        options.getOutputShardTemplate(),
-                        options.getAvroFilenameSuffix()
-                    ))
-                .withWindowedWrites()
-                .withNumShards(options.getNumShards())
-                .withTempDirectory(
-                    FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())
-                )
-                .withCodec(CodecFactory.snappyCodec()));
-        /*
-                .withTempDirectory(NestedValueProvider.of(
-                    options.getGcsTempLocation(),
-                    (SerializableFunction<String, ResourceId>) input ->
-                        FileBasedSink.convertToFileResourceIfPossible(input)
-                ))
-        */
+                            try {
+                                row = TableRowJsonCoder.of().decode(
+                                    new ByteArrayInputStream(dataStr.getBytes(StandardCharsets.UTF_8)), 
+                                    Context.OUTER);
 
-        errData.apply("Write windowed error data in CSV format", 
-            TextIO.write()
-                .withNumShards(options.getNumShards())
-                .withWindowedWrites()
-                .to(
-                    new WindowedFilenamePolicy(
-                        options.getErrOutputDir(),
-                        options.getFilenamePrefix(),
-                        options.getOutputShardTemplate(),
-                        options.getCsvFilenameSuffix()
-                    ))
-                .withTempDirectory(
-                    FileBasedSink.convertToFileResourceIfPossible(options.getTempLocation())));
+                                // row.set("event_ts",
+                                //     TimeUnit.MILLISECONDS.toSeconds(
+                                //         Long.parseLong(row.get("event_timestamp").toString())));
 
-        p.run();
-        //p.run().waitUntilFinish();
+                                logger.info("Tablerow: " + row.toString());
+                            } catch (IOException ex) {
+                                logger.error("Failed to produce Bigquery table row", ex);
+                            }
+                            
+                            ctx.output(row);
+                        }
+                    })  
+            );
+
+            WriteResult writeResult = bqData.apply("Insert into Bigquery",
+                BigQueryIO.writeTableRows()
+                    //.withJsonSchema(GCSUtils.getGcsFileAsString(options.getBqSchema().get().toString())) // I presume there is a bug, sigh
+                    .withSchema(parseSchema(options.getBqSchema().get().toString()))
+                    // .withTimePartitioning(
+                    //     new TimePartitioning().setField("event_ts")
+                    //         .setType("DAY")
+                    //         .setExpirationMs(null)
+                    // )
+                    .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
+                    .withWriteDisposition(WriteDisposition.WRITE_APPEND)
+                    .to(options.getBqOutputTable())
+                    .withExtendedErrorInfo()
+                    //.withoutValidation()
+                    .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                    //.withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API) // ONLY for batch
+                    .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
+                    .withCustomGcsTempLocation(options.getGcsTempLocation())
+            );
+
+            //TODO: either deal with WriteResult or backup the data right after read from Pubsub
+
+            p.run();
+        }
     }
 
+    /** Parse BigQuery schema from a Json file. */
+    private static TableSchema parseSchema(String jsonPath) {
+        TableSchema tableSchema = new TableSchema();
+        List<TableFieldSchema> fields = new ArrayList<>();
+
+        JSONObject jsonSchema = parseJson(jsonPath);
+
+        JSONArray bqSchemaJsonArray = jsonSchema.getJSONArray(BIGQUERY_SCHEMA);
+
+        for (int i = 0; i < bqSchemaJsonArray.length(); i++) {
+            JSONObject inputField = bqSchemaJsonArray.getJSONObject(i);
+            fields.add(convertToTableFieldSchema(inputField));
+        }
+        tableSchema.setFields(fields);
+
+        return tableSchema;
+    }
+
+    /**
+     * Convert a JSONObject from the Schema JSON to a TableFieldSchema. In case of RECORD, it handles
+     * it recursively.
+     *
+     * @param inputField Input field to convert.
+     * @return TableFieldSchema instance to populate the schema.
+     */
+    private static TableFieldSchema convertToTableFieldSchema(JSONObject inputField) {
+        TableFieldSchema field =
+            new TableFieldSchema()
+                .setName(inputField.getString(NAME))
+                .setType(inputField.getString(TYPE));
+
+        if (inputField.has(MODE)) {
+        field.setMode(inputField.getString(MODE));
+        }
+
+        if (inputField.getString(TYPE) != null && inputField.getString(TYPE).equals(RECORD_TYPE)) {
+        List<TableFieldSchema> nestedFields = new ArrayList<>();
+        JSONArray fieldsArr = inputField.getJSONArray(FIELDS_ENTRY);
+        for (int i = 0; i < fieldsArr.length(); i++) {
+            JSONObject nestedJSON = fieldsArr.getJSONObject(i);
+            nestedFields.add(convertToTableFieldSchema(nestedJSON));
+        }
+        field.setFields(nestedFields);
+        }
+
+        return field;
+    }
+
+    /**
+     * Parses a JSON file and returns a JSONObject containing the necessary source, sink, and schema
+     * information.
+     *
+     * @param pathToJson the JSON file location so we can download and parse it
+     * @return the parsed JSONObject
+     */
+    private static JSONObject parseJson(String pathToJson) {
+        try {
+        // accessing GCS needs to be done after the pipeline create call, otherwise FileSystems
+        // doesn't know about GCS.
+        ReadableByteChannel readableByteChannel =
+            FileSystems.open(FileSystems.matchNewResource(pathToJson, false));
+        String json =
+            new String(
+                StreamUtils.getBytesWithoutClosing(Channels.newInputStream(readableByteChannel)));
+        return new JSONObject(json);
+        } catch (Exception e) {
+        throw new RuntimeException(e);
+        }
+    }
 
     public static void main(String... args) {
         PipelineOptionsFactory.register(BindiegoStreamingOptions.class);
@@ -1016,4 +1156,6 @@ public class BindiegoStreaming {
     private static final String NAME = "name";
     private static final String TYPE = "type";
     private static final String MODE = "mode";
+    private static final String RECORD_TYPE = "RECORD";
+    private static final String FIELDS_ENTRY = "fields";
 }

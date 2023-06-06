@@ -18,7 +18,7 @@ import org.slf4j.LoggerFactory;
  */
 public class SchemaParser {
 
-  private static final Logger LOG = LoggerFactory.getLogger(SchemaParser.class);
+  private static final Logger logger = LoggerFactory.getLogger(SchemaParser.class);
 
   /**
    * Parses a JSON file and Returns a JSONObject containing the necessary source, sink, and schema
