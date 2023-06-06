@@ -11,6 +11,11 @@
   },
   {
     "mode": "NULLABLE",
+    "name": "event_ts",
+    "type": "TIMESTAMP"
+  },
+  {
+    "mode": "NULLABLE",
     "name": "event_name",
     "type": "STRING"
   },

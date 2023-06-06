@@ -1011,9 +1011,11 @@ public class BindiegoStreaming {
                                     new ByteArrayInputStream(dataStr.getBytes(StandardCharsets.UTF_8)), 
                                     Context.OUTER);
 
-                                // row.set("event_ts",
-                                //     TimeUnit.MILLISECONDS.toSeconds(
-                                //         Long.parseLong(row.get("event_timestamp").toString())));
+                                // REVISIT: check your original data here, it has to be seconds in order to ingest into BQ
+                                row.set("event_ts",
+                                    // TimeUnit.MILLISECONDS.toSeconds(
+                                    TimeUnit.MICROSECONDS.toSeconds(
+                                        Long.parseLong(row.get("event_timestamp").toString())));
 
                                 logger.info("Tablerow: " + row.toString());
                             } catch (IOException ex) {
@@ -1029,11 +1031,11 @@ public class BindiegoStreaming {
                 BigQueryIO.writeTableRows()
                     //.withJsonSchema(GCSUtils.getGcsFileAsString(options.getBqSchema().get().toString())) // I presume there is a bug, sigh
                     .withSchema(parseSchema(options.getBqSchema().get().toString()))
-                    // .withTimePartitioning(
-                    //     new TimePartitioning().setField("event_ts")
-                    //         .setType("DAY")
-                    //         .setExpirationMs(null)
-                    // )
+                    .withTimePartitioning(
+                        new TimePartitioning().setField("event_ts")
+                            .setType("DAY")
+                            .setExpirationMs(null)
+                    )
                     .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
                     .withWriteDisposition(WriteDisposition.WRITE_APPEND)
                     .to(options.getBqOutputTable())
