@@ -26,7 +26,37 @@ pubsub/kafka -> dataflow/flink -> join dimesion table -> data processing (realti
 - Ingest into data warehouse (BigQuery) for big data analysis
 - Data backup into files (Avro + CSV)
 
-#### Quick start 快速开始
+### GCLB (Google Cloud Load Balancer) real time analysis
+
+We have a dedicated [branch](https://github.com/cloudymoma/raycom/tree/gcp-lb-log) for this.
+
+#### Introduce the Basic Mode
+
+Basic mode is a simplified real time data pipeline sample created for Firebase/GA users as a quickstart.
+
+All you need to do is set the `isBasic` flag to `true` in one of those [runtime parameters](https://github.com/cloudymoma/raycom/blob/streaming/makefile#L25).
+
+Once the flag in on, the pipeline is simple as
+
+events data -> Pubsub -> Dataflow -> BigQuery
+
+You can use this [data generator](https://github.com/cloudymoma/gcpplayground#firebasega-sample-messages-to-pubsub) or publish the json data yourself, as long as you follow our predefined [schema](https://github.com/cloudymoma/raycom/blob/streaming/schemas/bq_firebase.json), which is exactly the same as [Firebase/GA native table](https://support.google.com/firebase/answer/7029846). Then the Beam code will take care of the rest. 
+
+I have tested pub/sub data across regions, TW & US, usually the data will be available in BQ within 500ms.
+
+##### When to consider this solution
+
+- Firebase / GA native pipeline has a delay up to 72 hours
+- Very occasional data losses, and it's hard to pinpoint the causation or fix it
+- Limited number of messages per day
+- Streaming inserts cost, this pipeline can run as batch jobs and [insert data through BigQuery Storage API](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#LL1045C79-L1045C79)
+
+##### Hints
+
+- You do not have to create the BigQuery table in advance. A time partitioned table based on the event timestamp will be auto created if it doesn't exist. 
+- There is no impact on business team at all since the data schema are the same as Firebase / GA native tables. They only see their data much more timely
+
+#### Quickstart 快速开始
 
 ##### Prerequisits
 
