@@ -26,7 +26,7 @@ pubsub/kafka -> dataflow/flink -> join dimesion table -> data processing (realti
 - Ingest into data warehouse (BigQuery) for big data analysis
 - Data backup into files (Avro + CSV)
 
-### GCLB (Google Cloud Load Balancer) real time analysis
+#### GCLB (Google Cloud Load Balancer) real time analysis
 
 We have a dedicated [branch](https://github.com/cloudymoma/raycom/tree/gcp-lb-log) for this.
 
