@@ -1,6 +1,6 @@
-## A Comprehensive Data Platform on GCP by using Apache Beam
+## A Comprehensive Data Platform on GCP
 
-You can use this master branch as a skeleton java project
+You can use this master branch as a skeleton beam project
 
 master分支可以用来当作一个骨架项目
 
