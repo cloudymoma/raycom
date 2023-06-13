@@ -55,6 +55,8 @@ I have tested pub/sub data across regions, TW & US, usually the data will be ava
 
 - You do not have to create the BigQuery table in advance. A time partitioned table based on the event timestamp will be auto created if it doesn't exist. 
 - There is no impact on business team at all since the data schema are the same as Firebase / GA native tables. They only see their data much more timely
+- In case you may want to migrate your old GA schema to Firebase/GA4, please use the tool [here](https://github.com/cloudymoma/gcp-playgroud-public/tree/master/BigQuery/migrate_GA2Firebase_legacy_data)
+- [How to get `user_pseudo_id` from the client SDK](https://github.com/cloudymoma/gcp-playgroud-public/blob/master/BigQuery/get_user_pseudo_id/readme.md)
 
 #### Quickstart 快速开始
 
