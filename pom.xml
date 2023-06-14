@@ -40,7 +40,7 @@
     <beam.version>2.47.0</beam.version>
 
     <bigtable.ver>2.8.1</bigtable.ver>
-    <guava.version>31.1-jre</guava.version>
+    <guava.version>32.0.0-jre</guava.version>
     <spark3.version>3.2.4</spark3.version>
     <joda.version>2.12.5</joda.version>
     <junit.version>4.13.1</junit.version>
