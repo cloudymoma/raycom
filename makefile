@@ -36,6 +36,7 @@ dfup: build
         -Dexec.cleanupDaemonThreads=false \
         -Dexec.args="--project=$(gcp_project) \
         --streaming=true \
+		--enableStreamingEngine \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
         --workerMachineType=$(workerType) \
@@ -46,6 +47,7 @@ dfup: build
         --gcsTempLocation=gs://$(gcs_bucket)/tmp/gcs/ \
         --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
+		--experiments=use_runner_v2 \
         --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
         --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
@@ -88,6 +90,7 @@ df: build
         -Dexec.cleanupDaemonThreads=false \
         -Dexec.args="--project=$(gcp_project) \
         --streaming=true \
+		--enableStreamingEngine \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
         --workerMachineType=$(workerType) \
@@ -98,6 +101,7 @@ df: build
         --gcsTempLocation=gs://$(gcs_bucket)/tmp/gcs/ \
         --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
+		--experiments=use_runner_v2 \
         --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
         --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
