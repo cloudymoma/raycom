@@ -56,6 +56,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.NoSuchElementException;
 import java.util.function.Predicate;
 import java.security.cert.X509Certificate;
@@ -102,6 +104,7 @@ import org.joda.time.Duration;
  *           @see org.elasticsearch.client.RestHighLevelClient
  */
 public class ElasticsearchIO {
+
     private ElasticsearchIO() {} // disable new
 
     private static final ObjectMapper mapper = new ObjectMapper();
@@ -749,21 +752,41 @@ public class ElasticsearchIO {
         }
     }
 
-    static int getEsVersion(ConnectionConf connectionConf) {
-        try (RestClient restClient = connectionConf.createClient()) {
+    private static void maybeLogVersionDeprecationWarning(int clusterVersion) {
+        if (DEPRECATED_CLUSTER_VERSIONS.contains(clusterVersion)) {
+            logger.warn(
+                "Support for Elasticsearch cluster version {} will be dropped in a future release of "
+                    + "the Apache Beam SDK & this ElasticsearchIO implementation",
+                clusterVersion);
+        }
+    }
+
+    static int getEsVersion(RestClient restClient) {
+        try {
             Request request = new Request("GET", "");
             Response response = restClient.performRequest(request);
             JsonNode jsonNode = parseResponse(response.getEntity());
             int esVersion =
                 Integer.parseInt(jsonNode.path("version").path("number").asText().substring(0, 1));
             checkArgument(
-                (esVersion == 7
-                    || esVersion == 8),
+                VALID_CLUSTER_VERSIONS.contains(esVersion),
                 "The Elasticsearch version to connect to is %s.x. "
                     + "This version of the ElasticsearchIO is only compatible with "
-                    + "Elasticsearch v8.x, v7.x",
+                    + "Elasticsearch "
+                    + VALID_CLUSTER_VERSIONS,
                 esVersion);
+
+            maybeLogVersionDeprecationWarning(esVersion);
+
             return esVersion;
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Cannot get Elasticsearch version", ex);
+        }
+    }
+
+    static int getEsVersion(ConnectionConf connectionConf) {
+        try (RestClient restClient = connectionConf.createClient()) {
+            return getEsVersion(restClient);
         } catch (IOException ex) {
             throw new IllegalArgumentException("Cannot get Elasticsearch version", ex);
         }
@@ -771,4 +794,8 @@ public class ElasticsearchIO {
 
     // Instantiate Logger
     private static final Logger logger = LoggerFactory.getLogger(ElasticsearchIO.class);
+
+    private static final List<Integer> VALID_CLUSTER_VERSIONS = Arrays.asList(7, 8);
+    private static final Set<Integer> DEPRECATED_CLUSTER_VERSIONS =
+      new HashSet<>(Arrays.asList(5, 6));
 }
