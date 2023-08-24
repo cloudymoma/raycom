@@ -215,7 +215,7 @@ Other out of scope topics on Elastic best practices,
 
 - [Index Lifecycle Management](https://www.elastic.co/guide/en/elasticsearch/reference/current/index-lifecycle-management.html)
 - [Snapshots & Restore](https://www.elastic.co/guide/en/elasticsearch/reference/current/snapshot-restore.html)
-- Elastic stack deployment: [Auto scripts](https://github.com/bindiego/local_services/tree/develop/elastic) or [on k8s / GKE](https://github.com/bindiego/local_services/tree/develop/k8s/gke/elastic)
+- Elastic stack deployment: [Auto scripts](https://github.com/bindiego/local_services/tree/develop/elastic) or **Highly Recommended** [Elastic on k8s/GKE](https://github.com/elasticsearch-cn/elastic-on-gke)
 
 ##### Run the pipeline
 
