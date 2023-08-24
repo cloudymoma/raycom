@@ -66,8 +66,6 @@ import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Prec
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
 
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.BoundedSource;
@@ -103,7 +101,6 @@ import org.joda.time.Duration;
  * Option 2: @see org.elasticsearch.client.RestClient or
  *           @see org.elasticsearch.client.RestHighLevelClient
  */
-@Experimental(Kind.SOURCE_SINK)
 public class ElasticsearchIO {
     private ElasticsearchIO() {} // disable new
 
