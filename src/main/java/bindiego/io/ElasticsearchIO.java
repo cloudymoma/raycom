@@ -64,9 +64,9 @@ import java.security.cert.X509Certificate;
 import java.security.NoSuchAlgorithmException;
 import java.security.KeyManagementException;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
 
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -232,7 +232,7 @@ public class ElasticsearchIO {
         public ConnectionConf withNumThread(Integer numThread) {
             checkArgument(null != numThread, "numThread cannot be null");
             return builder().setNumThread(
-                numThread <= 1 ? new Integer(1) : numThread
+                numThread <= 1 ? Integer.valueOf(1) : numThread
             ).build();
         }
 
