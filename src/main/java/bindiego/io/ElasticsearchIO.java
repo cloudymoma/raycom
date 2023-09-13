@@ -232,7 +232,7 @@ public class ElasticsearchIO {
         public ConnectionConf withNumThread(Integer numThread) {
             checkArgument(null != numThread, "numThread cannot be null");
             return builder().setNumThread(
-                numThread <= 1 ? new Integer(1) : numThread
+                numThread <= 1 ? Integer.valueOf(1) : numThread
             ).build();
         }
 
