@@ -36,7 +36,7 @@ dfup: build
         -Dexec.cleanupDaemonThreads=false \
         -Dexec.args="--project=$(gcp_project) \
         --streaming=true \
-		--enableStreamingEngine \
+        --enableStreamingEngine \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
         --workerMachineType=$(workerType) \
@@ -47,7 +47,7 @@ dfup: build
         --gcsTempLocation=gs://$(gcs_bucket)/tmp/gcs/ \
         --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
-		--experiments=use_runner_v2 \
+        --experiments=use_runner_v2 \
         --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
         --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
@@ -81,8 +81,8 @@ dfup: build
         --jobName=$(job) \
         --update \
         --region=$(region) \
-        --workerZone=$(region)-$(workerZone) \
         --isBasic=$(isBasic)"
+#--workerZone=$(region)-$(workerZone) \
 
 df: build
 	@mvn -Pdataflow-runner compile exec:java \
@@ -90,7 +90,7 @@ df: build
         -Dexec.cleanupDaemonThreads=false \
         -Dexec.args="--project=$(gcp_project) \
         --streaming=true \
-		--enableStreamingEngine \
+        --enableStreamingEngine \
         --autoscalingAlgorithm=THROUGHPUT_BASED \
         --maxNumWorkers=20 \
         --workerMachineType=$(workerType) \
@@ -101,7 +101,7 @@ df: build
         --gcsTempLocation=gs://$(gcs_bucket)/tmp/gcs/ \
         --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
-		--experiments=use_runner_v2 \
+        --experiments=use_runner_v2 \
         --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
         --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
@@ -134,8 +134,8 @@ df: build
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job) \
         --region=$(region) \
-        --workerZone=$(region)-$(workerZone) \
         --isBasic=$(isBasic)"
+#--workerZone=$(region)-$(workerZone) \
 
 cancel:
 	@gcloud dataflow jobs cancel $(job) --region=$(region)
