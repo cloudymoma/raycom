@@ -40,7 +40,7 @@
 
     <beam.version>2.64.0</beam.version>
 
-    <gcp.lib.bom>26.55.0</gcp.lib.bom>
+    <gcp.lib.bom>26.59.0</gcp.lib.bom>
 
     <bigtable.ver>2.14.6</bigtable.ver>
     <guava.version>33.4.0-jre</guava.version>
