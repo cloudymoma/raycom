@@ -38,9 +38,9 @@
     <maven-surefire-plugin.version>3.1.0</maven-surefire-plugin.version>
     <sonar-maven-plugin.version>5.0.0.4389</sonar-maven-plugin.version>
 
-    <beam.version>2.65.0</beam.version>
+    <beam.version>2.66.0</beam.version>
 
-    <gcp.lib.bom>26.59.0</gcp.lib.bom>
+    <gcp.lib.bom>26.63.0</gcp.lib.bom>
 
     <bigtable.ver>2.14.6</bigtable.ver>
     <guava.version>33.4.0-jre</guava.version>
