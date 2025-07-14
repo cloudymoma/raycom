@@ -48,6 +48,7 @@ dfup: build
         --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
         --experiments=use_runner_v2 \
+        --experiments=enable_data_sampling \
         --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
         --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
@@ -102,6 +103,7 @@ df: build
         --stagingLocation=gs://$(gcs_bucket)/staging/ \
         --runner=DataflowRunner \
         --experiments=use_runner_v2 \
+        --experiments=enable_data_sampling \
         --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
         --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
         --numShards=1 \
