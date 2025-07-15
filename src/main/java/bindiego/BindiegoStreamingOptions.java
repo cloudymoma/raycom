@@ -193,4 +193,9 @@ public interface BindiegoStreamingOptions
     @Default.Boolean(false)
     Boolean getIsBasic();
     void setIsBasic(Boolean value);
+
+    @Description("BigQuery write method in basic mode, streaming or fileloads")
+    @Default.String("streaming")
+    String getBqWriteMethod();
+    void setBqWriteMethod(String value);
 }

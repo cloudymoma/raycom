@@ -4,7 +4,7 @@ gcp_project := du-hast-mich
 region := asia-east1
 workerType := e2-standard-2
 workerZone := b
-job := raycom-streaming
+job := raycom
 pubsub_topic := firebase-rt-topic
 pubsub_sub := firebase-rt-sub
 bq_firebase_schema := bq_firebase.json
@@ -23,6 +23,7 @@ esBatchBytes := 10485760
 esNumThread := 2
 esIsIgnoreInsecureSSL := false
 isBasic := true
+bqWriteMethod := fileloads # streaming, fileloads
 
 clean:
 	@mvn clean
@@ -79,10 +80,11 @@ dfup: build
         --esNumThread=$(esNumThread) \
         --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
         --defaultWorkerLogLevel=INFO \
-        --jobName=$(job) \
+        --jobName=$(job)-$(bqWriteMethod) \
         --update \
         --region=$(region) \
-        --isBasic=$(isBasic)"
+        --isBasic=$(isBasic) \
+        --bqWriteMethod=$(bqWriteMethod)"
 #--workerZone=$(region)-$(workerZone) \
 
 df: build
@@ -134,16 +136,17 @@ df: build
         --esNumThread=$(esNumThread) \
         --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
         --defaultWorkerLogLevel=INFO \
-        --jobName=$(job) \
+        --jobName=$(job)-$(bqWriteMethod) \
         --region=$(region) \
-        --isBasic=$(isBasic)"
+        --isBasic=$(isBasic) \
+        --bqWriteMethod=$(bqWriteMethod)"
 #--workerZone=$(region)-$(workerZone) \
 
 cancel:
-	@gcloud dataflow jobs cancel $(job) --region=$(region)
+	@gcloud dataflow jobs cancel $(job)-$(bqWriteMethod) --region=$(region)
 
 drain:
-	@gcloud dataflow jobs drain $(job) --region=$(region)
+	@gcloud dataflow jobs drain $(job)-$(bqWriteMethod) --region=$(region)
 
 btcluster:
 	@cbt createinstance $(bigtable_instance) "Bigbase" bigbaby $(region)-a 1 SSD

@@ -981,23 +981,6 @@ public class BindiegoStreaming {
             );
 
             PCollection<TableRow> bqData = strData.get(STR_OUT)
-                /*
-                .apply(options.getWindowSize() + " window for bounded data",
-                    Window.<String>into(FixedWindows.of(DurationUtils.parseDuration(options.getWindowSize())))
-                        .triggering(
-                            AfterWatermark.pastEndOfWindow()
-                                .withEarlyFirings(
-                                    AfterProcessingTime
-                                        .pastFirstElementInPane() 
-                                        .plusDelayOf(DurationUtils.parseDuration(options.getEarlyFiringPeriod())))
-                                .withLateFirings(
-                                    AfterPane.elementCountAtLeast(
-                                        options.getLateFiringCount().intValue()))
-                        )
-                        .discardingFiredPanes() // e.g. .accumulatingFiredPanes() etc.
-                        .withAllowedLateness(DurationUtils.parseDuration(options.getAllowedLateness()),
-                            ClosingBehavior.FIRE_IF_NON_EMPTY))
-                */
                 .apply("Decode json str to Bigquery TableRow",
                     ParDo.of(new DoFn<String, TableRow>() {
                         @ProcessElement
@@ -1031,27 +1014,45 @@ public class BindiegoStreaming {
                     })  
             );
 
-            WriteResult writeResult = bqData.apply("Insert into Bigquery",
-                BigQueryIO.writeTableRows()
-                    //.withJsonSchema(GCSUtils.getGcsFileAsString(options.getBqSchema().get().toString())) // I presume there is a bug, sigh
-                    .withSchema(parseSchema(options.getBqSchema().get().toString()))
-                    .withTimePartitioning(
-                        new TimePartitioning().setField("event_ts")
-                            .setType("DAY")
-                            .setExpirationMs(null)
-                    )
-                    .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
-                    .withWriteDisposition(WriteDisposition.WRITE_APPEND)
-                    .to(options.getBqOutputTable())
-                    .withExtendedErrorInfo()
-                    //.withoutValidation()
-                    .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                    //.withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API) // ONLY for batch
-                    .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
-                    .withCustomGcsTempLocation(options.getGcsTempLocation())
-            );
+            if (options.getBqWriteMethod().equals("fileloads")) {
+                bqData.apply("FILE_LOADS into Bigquery",
+                    BigQueryIO.writeTableRows()
+                        .withSchema(parseSchema(options.getBqSchema().get().toString()))
+                        .withTimePartitioning(
+                            new TimePartitioning().setField("event_ts")
+                                .setType("DAY")
+                                .setExpirationMs(null)
+                        )
+                        .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
+                        .withWriteDisposition(WriteDisposition.WRITE_APPEND)
+                        .to(options.getBqOutputTable())
+                        .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
+                        .withTriggeringFrequency(Duration.standardMinutes(5))
+                        .withCustomGcsTempLocation(options.getGcsTempLocation())
+                );
+            } else { // streaming
+                WriteResult writeResult = bqData.apply("STREAMING_INSERTS into Bigquery",
+                    BigQueryIO.writeTableRows()
+                        //.withJsonSchema(GCSUtils.getGcsFileAsString(options.getBqSchema().get().toString())) // I presume there is a bug, sigh
+                        .withSchema(parseSchema(options.getBqSchema().get().toString()))
+                        .withTimePartitioning(
+                            new TimePartitioning().setField("event_ts")
+                                .setType("DAY")
+                                .setExpirationMs(null)
+                        )
+                        .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
+                        .withWriteDisposition(WriteDisposition.WRITE_APPEND)
+                        .to(options.getBqOutputTable())
+                        .withExtendedErrorInfo()
+                        //.withoutValidation()
+                        .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                        //.withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API) // ONLY for batch
+                        .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
+                        .withCustomGcsTempLocation(options.getGcsTempLocation())
+                );
 
-            //TODO: either deal with WriteResult or backup the data right after read from Pubsub
+                //TODO: either deal with WriteResult or backup the data right after read from Pubsub
+            }
 
             p.run();
         }
