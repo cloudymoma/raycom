@@ -1011,6 +1011,10 @@ public class BindiegoStreaming {
                                     new ByteArrayInputStream(dataStr.getBytes(StandardCharsets.UTF_8)), 
                                     Context.OUTER);
 
+                                if (row.containsKey("perf_ts")) {
+                                    row.remove("perf_ts");
+                                }
+
                                 // REVISIT: check your original data here, it has to be seconds in order to ingest into BQ
                                 row.set("event_ts",
                                     // TimeUnit.MILLISECONDS.toSeconds(
