@@ -14,7 +14,13 @@ esBatchBytes := 10485760
 esNumThread := 2
 esIsIgnoreInsecureSSL := false
 
-dfup:
+clean:
+	@mvn clean
+
+build:
+	@mvn compile
+
+dfup: build
 	@mvn -Pdataflow-runner compile exec:java \
         -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.cleanupDaemonThreads=false \
@@ -30,6 +36,8 @@ dfup:
         --gcsTempLocation=gs://bindiego/tmp/gcs/ \
         --stagingLocation=gs://bindiego/staging/ \
         --runner=DataflowRunner \
+        --experiments=use_runner_v2 \
+        --experiments=enable_data_sampling \
         --topic=projects/$(project)/topics/gclb-topic \
         --subscription=projects/$(project)/subscriptions/gclb-sub \
         --numShards=1 \
@@ -54,7 +62,7 @@ dfup:
         --region=$(region) \
         --workerZone=$(region)-$(workerZone)"
 
-df:
+df: build
 	@mvn -Pdataflow-runner compile exec:java \
         -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.cleanupDaemonThreads=false \
@@ -70,6 +78,8 @@ df:
         --gcsTempLocation=gs://bindiego/tmp/gcs/ \
         --stagingLocation=gs://bindiego/staging/ \
         --runner=DataflowRunner \
+        --experiments=use_runner_v2 \
+        --experiments=enable_data_sampling \
         --topic=projects/$(project)/topics/gclb-topic \
         --subscription=projects/$(project)/subscriptions/gclb-sub \
         --numShards=1 \
