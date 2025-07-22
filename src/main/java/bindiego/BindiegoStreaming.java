@@ -903,6 +903,7 @@ public class BindiegoStreaming {
                             .withWriteDisposition(WriteDisposition.WRITE_APPEND)
                             .to(options.getBqOutputTable())
                             .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                            .withAutoSharding()
                             .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
                             .withCustomGcsTempLocation(options.getGcsTempLocation()));
 
@@ -1027,6 +1028,7 @@ public class BindiegoStreaming {
                         .withWriteDisposition(WriteDisposition.WRITE_APPEND)
                         .to(options.getBqOutputTable())
                         .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
+                        .withAutoSharding()
                         .withTriggeringFrequency(Duration.standardMinutes(5))
                         .withCustomGcsTempLocation(options.getGcsTempLocation())
                 );
@@ -1046,6 +1048,7 @@ public class BindiegoStreaming {
                         .withExtendedErrorInfo()
                         //.withoutValidation()
                         .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                        .withAutoSharding()
                         //.withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API) // ONLY for batch
                         .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
                         .withCustomGcsTempLocation(options.getGcsTempLocation())
