@@ -1,0 +1,37 @@
+#!/bin/sh
+
+# This pre-commit hook is designed to prevent committing secrets and key files.
+
+# List of patterns to block
+patterns=(
+    "*.key",
+    "*.pem",
+    "*.p12",
+    "*.pfx",
+    "*.asc",
+    "*secret*.yml",
+    "*secret*.json",
+    "*credential*.yml",
+    "*credential*.json",
+    "*token*.yml",
+    "*token*.json",
+    "*password*.yml",
+    "*password*.json"
+)
+
+# Check for secrets in staged files
+for pattern in "${patterns[@]}"; do
+    if git diff --cached --name-only | grep -qE "$pattern"; then
+        echo "Error: Attempting to commit a secret file: $pattern"
+        exit 1
+    fi
+done
+
+# Check for secrets in file content
+if git diff --cached | grep -qE '("|")?(password|token|secret)("|")?\s*[:=]'; then
+    echo "Error: Attempting to commit a secret in the code."
+    exit 1
+fi
+
+exit 0
+
