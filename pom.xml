@@ -40,7 +40,7 @@
 
     <beam.version>2.66.0</beam.version>
 
-    <gcp.lib.bom>26.63.0</gcp.lib.bom>
+    <gcp.lib.bom>26.64.0</gcp.lib.bom>
 
     <bigtable.ver>2.14.6</bigtable.ver>
     <guava.version>33.4.0-jre</guava.version>
@@ -50,7 +50,7 @@
     <slf4j.version>1.7.30</slf4j.version>    
     <json.version>20240303</json.version>
     <mysql.ver>9.1.0</mysql.ver>
-    <elastic.ver>8.13.4</elastic.ver>
+    <elastic.ver>8.18.3</elastic.ver>
     <auto-value.version>1.10.1</auto-value.version>
     <gson.ver>2.10.1</gson.ver>
     <hadoop.version>3.3.4</hadoop.version>
@@ -60,6 +60,10 @@
     <jackson.ver>2.18.1</jackson.ver>
     <kafka.client.ver>3.7.2</kafka.client.ver>
     <gcpkafka.auth.ver>1.0.5</gcpkafka.auth.ver>
+    <httpclient.version>4.5.13</httpclient.version>
+    <paranamer.version>2.8</paranamer.version>
+    <jackson.databind.version>2.12.7</jackson.databind.version>
+    <jakarta.json.version>2.1.2</jakarta.json.version>
   </properties>
 
   <repositories>
@@ -255,7 +259,7 @@
         <dependency>
           <groupId>org.apache.httpcomponents</groupId>
           <artifactId>httpclient</artifactId>
-          <version>4.5.13</version>
+          <version>${httpclient.version}</version>
           <scope>runtime</scope>
           <exclusions>
             <exclusion>
@@ -345,7 +349,7 @@
             <dependency>
                 <groupId>com.thoughtworks.paranamer</groupId>
                 <artifactId>paranamer</artifactId>
-                <version>2.8</version>
+                <version>${paranamer.version}</version>
                 <scope>runtime</scope>
             </dependency>
         </dependencies>
@@ -575,18 +579,8 @@
       <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
       <version>${beam.version}</version>
     </dependency>
-    <dependency>
-      <groupId>org.apache.beam</groupId>
-      <artifactId>beam-sdks-java-extensions-google-cloud-platform-core</artifactId>
-      <version>${beam.version}</version>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.beam</groupId>
-      <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
-      <version>${beam.version}</version>
-      <scope>compile</scope>
-    </dependency>
+    
+    
 
     <dependency>
       <groupId>org.json</groupId>
@@ -602,9 +596,19 @@
 
     <!-- Elasticsearch REST Client -->
     <dependency>
-      <groupId>org.elasticsearch.client</groupId>
-      <artifactId>elasticsearch-rest-client</artifactId>
+      <groupId>co.elastic.clients</groupId>
+      <artifactId>elasticsearch-java</artifactId>
       <version>${elastic.ver}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.databind.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>jakarta.json</groupId>
+      <artifactId>jakarta.json-api</artifactId>
+      <version>${jakarta.json.version}</version>
     </dependency>
 
     <!-- Google AutoValue -->
@@ -638,10 +642,6 @@
         <artifactId>jackson-core</artifactId>
         <version>${jackson.ver}</version>
     </dependency>
-    <dependency>
-        <groupId>com.fasterxml.jackson.core</groupId>
-        <artifactId>jackson-databind</artifactId>
-        <version>${jackson.ver}</version>
-    </dependency>
+    
   </dependencies>
 </project>

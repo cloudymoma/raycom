@@ -2,12 +2,10 @@ package bindiego.io;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClientBuilder;
-// import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.client.ResponseListener;
 import org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback;
 
@@ -359,9 +357,11 @@ public class ElasticsearchIO {
             return restClientBuilder;
         }
 
-        RestClient createClient() throws IOException {
+        private RestClient createClient() throws IOException {
             return createClientBuilder().build();
         }
+
+        
 
         /*
         RestHighLevelClient createHighLevelClient() throws IOException {
@@ -530,37 +530,9 @@ public class ElasticsearchIO {
             private ArrayList<String> batch;
             private long currentBatchSizeBytes;
 
-            private static class DocMeta implements Serializable {
-                final String index;
+            
 
-                DocMeta(final String index) {
-                    this.index = index;
-                }
-            }
-
-            private class DocMetaSerializer extends StdSerializer<DocMeta> {
-                private DocMetaSerializer() {
-                    super(DocMeta.class);
-                }
-
-                @Override
-                public void serialize (
-                        DocMeta value, JsonGenerator gen, SerializerProvider provider)
-                        throws IOException {
-                    gen.writeStartObject();
-
-                    if (null != value.index) {
-                        gen.writeStringField("_index", value.index);
-                    }
-
-                    gen.writeEndObject();
-                }
-            }
-
-            // { "index":{} }
-            private String getDocMeta(String document) throws IOException {
-                return "{}";
-            }
+            
 
             private static String lowerCaseOrNull(String input) {
                 return input == null ? null : input.toLowerCase();
@@ -599,11 +571,7 @@ public class ElasticsearchIO {
             @ProcessElement
             public void processElement(ProcessContext context) throws Exception {
                 String doc = context.element();
-                String docMeta = getDocMeta(doc);
-
-                // { "index":{} }
-                // { <doc json> }
-                batch.add(String.format("{ \"index\" : %s }%n%s%n", docMeta, doc));
+                batch.add(doc);
 
                 currentBatchSizeBytes += doc.getBytes(StandardCharsets.UTF_8).length;
                 if (batch.size() >= spec.getMaxBatchSize()
@@ -632,7 +600,7 @@ public class ElasticsearchIO {
 
                 StringBuilder bulkRequest = new StringBuilder();
                 for (String json : batch) {
-                    bulkRequest.append(json);
+                    bulkRequest.append(String.format("{\"index\":{}}%n%s%n", json));
                 }
 
                 batch.clear();
@@ -647,63 +615,20 @@ public class ElasticsearchIO {
                 request.addParameters(Collections.emptyMap());
                 request.setEntity(requestBody);
 
-                // Sync
-                Response response = restClient.performRequest(request);
-                HttpEntity responseEntity = new BufferedHttpEntity(response.getEntity());
-                if (null != spec.getRetryConf() 
-                        && spec.getRetryConf().getRetryPredicate().test(responseEntity)) {
-                    responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
-                }
-
-                // Async
-                /*
                 restClient.performRequestAsync(request, new ResponseListener() {
                     @Override
                     public void onSuccess(Response response) {
-                        try {
-                            HttpEntity responseEntity = new BufferedHttpEntity(response.getEntity());
-                            if (null != spec.getRetryConf() 
-                                    && spec.getRetryConf().getRetryPredicate().test(responseEntity)) {
-                                responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
-                            }
-                        } catch (Exception ex) {}
+                        logger.info("Successfully flushed batch to Elasticsearch");
                     }
 
                     @Override
-                    public void onFailure(Exception ex) {
-                        logger.error("Elasticsearch ingest failed", ex);
+                    public void onFailure(Exception exception) {
+                        logger.error("Failed to flush batch to Elasticsearch", exception);
                     }
                 });
-                */
             }
 
-            private HttpEntity handleRetry(
-                String method, String endPoint, Map<String, String> params, HttpEntity requestBody)
-                    throws IOException, InterruptedException {
-                Response response;
-                HttpEntity responseEntity;      
-
-                Sleeper sleeper = Sleeper.DEFAULT;
-                BackOff backoff = retryBackoff.backoff();
-                int attempt = 0;
-
-                while(BackOffUtils.next(sleeper, backoff)) {
-                    logger.warn(String.format(RETRY_ATTEMPT_LOG, ++attempt));
-
-                    Request request = new Request(method, endPoint);
-                    request.addParameters(params);
-                    request.setEntity(requestBody);
-
-                    response = restClient.performRequest(request);
-                    responseEntity = new BufferedHttpEntity(response.getEntity());
-
-                    if (!spec.getRetryConf().getRetryPredicate().test(responseEntity)) {
-                        return responseEntity;
-                    }
-                }
-
-                throw new IOException(String.format(RETRY_FAILED_LOG, attempt));
-            }
+            
         }
     }
 
