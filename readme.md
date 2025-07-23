@@ -15,7 +15,7 @@ Stackdriver logging -> Pubsub -> Dataflow -> Elasticsearch
 #### Current pipeline DAG
 ![](https://raw.githubusercontent.com/cloudymoma/raycom/gcp-lb-log/miscs/pipeline_dag.png)
 
-#### Quick start 快速开始
+#### Quickstart 快速开始
 
 ##### Prerequisits
 
@@ -71,7 +71,7 @@ make df
 
 ###### FAQs 常见问题
 
-1. SSL connection issue 
+1. SSL connection issue
 
 You may need to change the `esIsIgnoreInsecureSSL` in [`makefile`](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/makefile#L15) here to `true` in case you have a self-signed certificate.
 
@@ -83,7 +83,7 @@ Please consult the [Dataflow security and permissions ](https://cloud.google.com
 
 First of all, we could do it when create a the [sink](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/gcp_setup.sh#L16-L17). Or in the Elasticsearch [pipeline](https://github.com/cloudymoma/raycom/blob/gcp-lb-log/scripts/elastic/index-gclb-pipeline.json#L4-L8). It's highly recommended to do it at the sink. That would be more efficient. We only demonstrate how to use that *drop* processor here in the code in case you may need for other purposes.
 
-The reason we drop that is to prevent a dead loop. We have configured our Elastic Stack behind the Google Cloud Load Balancer which all have the keyword *ingest* for Elasticsearch ingest nodes. So the accessing logs will be processed by the logging pipeline as an infinite loop. Imagine: POST data to ingest nodes -> GCLB produce logs -> ingest logs over and over again. 
+The reason we drop that is to prevent a dead loop. We have configured our Elastic Stack behind the Google Cloud Load Balancer which all have the keyword *ingest* for Elasticsearch ingest nodes. So the accessing logs will be processed by the logging pipeline as an infinite loop. Imagine: POST data to ingest nodes -> GCLB produce logs -> ingest logs over and over again.
 
 So you may or may not need this, please adjust accordingly to your environment.
 
