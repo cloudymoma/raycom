@@ -1,6 +1,6 @@
 pwd := $(shell pwd)
 ipaddr := $(shell hostname -I | cut -d ' ' -f 1)
-region := asia-east1
+region := us-central1
 workerType := e2-standard-2
 workerZone := b
 project := du-hast-mich
