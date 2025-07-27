@@ -72,8 +72,9 @@ __create_index_and_setup() {
 __create_data_view() {
     echo "Creating Kibana Data View for GCLB logs..."
     
-    # Modern Kibana 8.x Data Views API
+    # Modern Kibana 8.x Data Views API with SSL certificate bypass
     curl -X POST \
+        -k \
         -u "${es_user}:${es_pass}" \
         "${kbn_host}/api/data_views/data_view" \
         -H "kbn-xsrf: true" \
