@@ -2,7 +2,7 @@
     "index_patterns": [
         "gclb*"
     ],
-    "order": 999,
+    "priority": 999,
     "settings": {
         "number_of_shards": 2,
         "number_of_replicas": 1,
@@ -338,6 +338,28 @@
                                 "ignore_above": 256
                             }
                         }
+                    },
+                    "remoteIp": {
+                        "type": "ip",
+                        "fields": {
+                            "keyword": {
+                                "type": "keyword",
+                                "ignore_above": 256
+                            }
+                        }
+                    },
+                    "backendTargetProjectNumber": {
+                        "type": "text",
+                        "fields": {
+                            "keyword": {
+                                "type": "keyword",
+                                "ignore_above": 256
+                            }
+                        }
+                    },
+                    "cacheDecision": {
+                        "type": "keyword",
+                        "ignore_above": 64
                     }
                 }
             },
