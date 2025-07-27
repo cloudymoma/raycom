@@ -613,8 +613,7 @@ public class ElasticsearchIO {
             private String poolKey;
             
             // Performance optimization: reuse byte buffers
-            private final ThreadLocal<ByteArrayOutputStream> byteBufferPool = 
-                ThreadLocal.withInitial(() -> new ByteArrayOutputStream(8192));
+            private transient ThreadLocal<ByteArrayOutputStream> byteBufferPool;
             
             // Async operation tracking
             private final List<CompletableFuture<Void>> pendingOperations = 
@@ -628,6 +627,9 @@ public class ElasticsearchIO {
             public void setup() throws IOException {
                 ConnectionConf connectionConf = spec.getConnectionConf();
                 poolKey = connectionConf.getPoolKey();
+                
+                // Initialize ThreadLocal after deserialization
+                byteBufferPool = ThreadLocal.withInitial(() -> new ByteArrayOutputStream(8192));
                 
                 // Use cached version or get from server
                 esVersion = versionCache.computeIfAbsent(poolKey, k -> {
