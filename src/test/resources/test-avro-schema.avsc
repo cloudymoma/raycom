@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "TestRecord",
+  "namespace": "bindiego.test",
+  "fields": [
+    {
+      "name": "id",
+      "type": "string"
+    },
+    {
+      "name": "timestamp",
+      "type": "long"
+    },
+    {
+      "name": "data",
+      "type": "string"
+    }
+  ]
+}
