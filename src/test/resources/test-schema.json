@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "source": {
+    "type": "pubsub",
+    "subscription": "projects/test-project/subscriptions/test-subscription"
+  },
+  "sink": {
+    "type": "elasticsearch",
+    "host": "localhost:9200",
+    "index": "test-index"
+  },
+  "schema": {
+    "fields": [
+      {
+        "name": "timestamp",
+        "type": "STRING"
+      },
+      {
+        "name": "message",
+        "type": "STRING"
+      },
+      {
+        "name": "level",
+        "type": "STRING"
+      }
+    ]
+  }
+}
