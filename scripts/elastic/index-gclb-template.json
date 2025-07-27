@@ -3,13 +3,14 @@
         "gclb*"
     ],
     "priority": 999,
-    "settings": {
-        "number_of_shards": 2,
-        "number_of_replicas": 1,
-        "final_pipeline": "gclb",
-        "index.lifecycle.name": "gclb-policy",
-        "index.lifecycle.rollover_alias": "gclb-ingest"
-    },
+    "template": {
+        "settings": {
+            "number_of_shards": 2,
+            "number_of_replicas": 1,
+            "index.default_pipeline": "gclb",
+            "index.lifecycle.name": "gclb-policy",
+            "index.lifecycle.rollover_alias": "gclb-ingest"
+        },
     "mappings": {
         "properties": {
             "@timestamp": {
@@ -474,5 +475,12 @@
                 }
             }
         }
+    },
+    "composed_of": [],
+    "version": 1,
+    "_meta": {
+        "description": "Index template for Google Cloud Load Balancer logs - ES 8.18 compatible",
+        "created_by": "gclb-streaming-pipeline",
+        "version": "1.0"
     }
 }
