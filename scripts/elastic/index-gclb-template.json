@@ -476,7 +476,6 @@
             }
         }
     },
-    "version": 1,
     "_meta": {
         "description": "Index template for Google Cloud Load Balancer logs - ES 8.18 compatible",
         "created_by": "gclb-streaming-pipeline",
