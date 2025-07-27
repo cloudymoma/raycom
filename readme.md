@@ -40,7 +40,17 @@ Elasticsearch
 
 ##### Preparation
 
-1. Setup GCP
+1. **Configure Elasticsearch Password**
+
+Create a `.espass` file in the project root directory containing your Elasticsearch password:
+
+```bash
+echo "your_elasticsearch_password" > .espass
+```
+
+This file is automatically ignored by git (configured in `.gitignore`) to prevent accidentally committing sensitive credentials. Both the makefile and Elasticsearch setup scripts will read the password from this file, with a fallback to "changeme" if the file doesn't exist.
+
+2. Setup GCP
 
 You could simply run `cd scripts && ./gcp_setup.sh; cd -`, but before that, make sure the parameters on the top have been updated according to your environment, especially the `project` variable, others are really optional.
 
@@ -50,9 +60,11 @@ So this script will
 - Setup a Stackdriver sink (Pubsub) for HTTP load balancers
 - Grant permissions to the Service Account that been used by the sink, who will publish logs to Pubsub topic
 
-2. Sethup Elasticsearch & Kibana
+3. Setup Elasticsearch & Kibana
 
 Same as GCP, there is a script can get the job done. Simply run `cd scripts/elastic && ./init.sh; cd -` then you done. Also, make sure you have updated the parameters on the top of the `init.sh` script according to your Elasticsearch setup.
+
+**Note**: The Elasticsearch setup script will automatically use the password from the `.espass` file you created in step 1. Make sure your Elasticsearch cluster is accessible and the credentials are correct.
 
 This script will
 
@@ -78,6 +90,8 @@ Double check the paramters passed to the job trigger in `makefile`, then,
 ```
 make df
 ```
+
+**Security Note**: All makefile commands automatically use the Elasticsearch password from your `.espass` file, ensuring secure credential handling across development and production environments.
 
 ###### FAQs 常见问题
 
