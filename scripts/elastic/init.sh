@@ -4,11 +4,12 @@
 # Updated to use modern APIs and best practices for ES 8.x
 
 pwd=`pwd`
+project_root="$(cd "$pwd/../.." && pwd)"
 
 es_client=https://k8es.client.bindiego.com
 kbn_host=https://k8na.bindiego.com
 es_user=elastic
-es_pass=changeme
+es_pass=$(cat "$project_root/.espass" 2>/dev/null || echo "changeme")
 
 # Create an ES pipeline for GCLB logs (Compatible with ES 8.18)
 __create_index_pipeline() {

@@ -1,6 +1,7 @@
 # Project specific
 output-*
 debug
+.espass
 
 ##########################
 ## Java
