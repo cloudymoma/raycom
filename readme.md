@@ -1,5 +1,7 @@
 ## A Comprehensive Data Platform on GCP
 
+[![Maven Compile](https://github.com/cloudymoma/raycom/actions/workflows/maven-compile.yml/badge.svg?branch=streaming)](https://github.com/cloudymoma/raycom/actions/workflows/maven-compile.yml)
+
 You can use this master branch as a skeleton beam project
 
 master分支可以用来当作一个骨架项目
