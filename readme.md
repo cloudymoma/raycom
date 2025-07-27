@@ -1,6 +1,6 @@
 ## Google Cloud Load Balancer logs in Elasticsearch
 
-[![Build Status](https://jenkins.bindiego.com/buildStatus/icon?job=raycom-gclb-log)](https://jenkins.bindiego.com/job/raycom-gclb-log/)
+[![Unit Tests](https://github.com/cloudymoma/raycom/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/cloudymoma/raycom/actions/workflows/unit-tests.yml)
 
 This project provides a comprehensive solution for streaming Google Cloud Load Balancer (GCLB) logs to Elasticsearch using Apache Beam and Google Cloud Dataflow. It includes CDN setup, performance optimizations, and comprehensive monitoring capabilities.
 
