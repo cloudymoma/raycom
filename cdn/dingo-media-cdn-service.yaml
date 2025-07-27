@@ -1,0 +1,21 @@
+name: dingo-media-cdn-service
+routing:
+  hostRules:
+  - hosts:
+    - bindiego.com
+    pathMatcher: routes
+  pathMatchers:
+  - name: routes
+    routeRules:
+    - priority: 1
+      matchRules:
+      - prefixMatch: /
+      origin: dingo-media-cdn
+      routeAction:
+        cdnPolicy:
+          cacheMode: CACHE_ALL_STATIC
+          defaultTtl: 3600s
+      headerAction:
+        responseHeadersToAdd:
+        - headerName: "x-cache-status"
+          headerValue: "{cdn_cache_status}"
