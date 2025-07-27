@@ -50,17 +50,22 @@ __create_index_and_setup() {
         -d "@${pwd}/index-gclb-policy.json"
 
     echo -e "\nCreating initial index with write alias..."
-    curl -X PUT \
-        -u "${es_user}:${es_pass}" \
-        "${es_client}/gclb-000001" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "aliases": {
-                "gclb-ingest": {
-                    "is_write_index": true
+    # Check if index already exists
+    if curl -s -f -u "${es_user}:${es_pass}" "${es_client}/gclb-000001" > /dev/null 2>&1; then
+        echo "Index gclb-000001 already exists, skipping creation..."
+    else
+        curl -X PUT \
+            -u "${es_user}:${es_pass}" \
+            "${es_client}/gclb-000001" \
+            -H "Content-Type: application/json" \
+            -d '{
+                "aliases": {
+                    "gclb-ingest": {
+                        "is_write_index": true
+                    }
                 }
-            }
-        }'
+            }'
+    fi
 
     echo -e "\nVerifying ILM policy assignment..."
     curl -X GET \
