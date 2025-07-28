@@ -6,8 +6,8 @@
 pwd=`pwd`
 project_root="$(cd "$pwd/../.." && pwd)"
 
-es_client=https://k8es.client.bindiego.com
-kbn_host=https://k8na.bindiego.com
+es_client=$(cat "$project_root/.eshost" 2>/dev/null || echo "https://k8es.client.bindiego.com")
+kbn_host=$(cat "$project_root/.kbnhost" 2>/dev/null || echo "https://k8na.bindiego.com")
 es_user=elastic
 es_pass=$(cat "$project_root/.espass" 2>/dev/null || echo "changeme")
 
