@@ -399,6 +399,21 @@ public class ElasticsearchIO {
 
         private RestClient createClient() throws IOException {
             String poolKey = getPoolKey();
+            
+            // Check if we have a valid client in the pool
+            RestClient existingClient = clientPool.get(poolKey);
+            if (existingClient != null && !existingClient.isRunning()) {
+                // Remove closed client from pool
+                logger.warn("Removing closed RestClient for pool key: {}", poolKey);
+                clientPool.remove(poolKey);
+                existingClient = null;
+            }
+            
+            if (existingClient != null) {
+                return existingClient;
+            }
+            
+            // Create new client if none exists or previous was closed
             return clientPool.computeIfAbsent(poolKey, k -> {
                 try {
                     RestClient client = createClientBuilder().build();
@@ -411,7 +426,7 @@ public class ElasticsearchIO {
             });
         }
         
-        // Get cached client from pool
+        // Get cached client from pool with validation
         public RestClient getPooledClient() throws IOException {
             return createClient();
         }
@@ -640,13 +655,25 @@ public class ElasticsearchIO {
                     try {
                         return getEsVersion(connectionConf);
                     } catch (Exception e) {
-                        logger.warn("Failed to get ES version, defaulting to 7", e);
-                        return 7;
+                        logger.warn("Failed to get ES version from {}, defaulting to 8. Error: {}", 
+                            connectionConf.getAddress(), e.getMessage());
+                        return 8;
                     }
                 });
                 
-                // Get pooled client
-                restClient = connectionConf.getPooledClient();
+                // Get pooled client with retry on failure
+                try {
+                    restClient = connectionConf.getPooledClient();
+                } catch (IOException e) {
+                    logger.error("Failed to create Elasticsearch client for {}: {}", 
+                        connectionConf.getAddress(), e.getMessage());
+                    throw new RuntimeException("Cannot connect to Elasticsearch cluster at " + 
+                        connectionConf.getAddress() + ". Please check: \n" +
+                        "1. Elasticsearch cluster is running and accessible\n" +
+                        "2. Host/DNS resolution is working: " + connectionConf.getAddress() + "\n" +
+                        "3. Network connectivity and firewall settings\n" +
+                        "4. SSL/authentication configuration", e);
+                }
                 
                 retryBackoff = FluentBackoff.DEFAULT
                     .withMaxRetries(0)
@@ -817,6 +844,12 @@ public class ElasticsearchIO {
                 while (true) {
                     HttpEntity responseEntity = null;
                     try {
+                        // Validate client state before making request
+                        if (!restClient.isRunning()) {
+                            logger.warn("RestClient is not running, attempting to recreate...");
+                            restClient = spec.getConnectionConf().getPooledClient();
+                        }
+                        
                         HttpEntity entity = new NStringEntity(new String(requestBody, StandardCharsets.UTF_8), 
                             ContentType.APPLICATION_JSON);
                         
@@ -840,6 +873,20 @@ public class ElasticsearchIO {
                     } catch (Exception e) {
                         attempt++;
                         totalErrors.incrementAndGet();
+                        
+                        // Handle client state issues specifically
+                        if (e.getCause() instanceof IllegalStateException) {
+                            logger.warn("IllegalStateException detected - client may be closed. Recreating client...");
+                            try {
+                                // Force recreation of client by removing from pool
+                                String poolKey = spec.getConnectionConf().getPoolKey();
+                                clientPool.remove(poolKey);
+                                restClient = spec.getConnectionConf().getPooledClient();
+                                logger.info("Successfully recreated RestClient after IllegalStateException");
+                            } catch (Exception recreateEx) {
+                                logger.error("Failed to recreate RestClient", recreateEx);
+                            }
+                        }
                         
                         if (attempt > (spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1)) {
                             logger.error(RETRY_FAILED_LOG, attempt);
@@ -971,7 +1018,8 @@ public class ElasticsearchIO {
         try (RestClient restClient = connectionConf.createClient()) {
             return getEsVersion(restClient);
         } catch (IOException ex) {
-            throw new IllegalArgumentException("Cannot get Elasticsearch version", ex);
+            throw new IllegalArgumentException("Cannot get Elasticsearch version from " + 
+                connectionConf.getAddress() + ": " + ex.getMessage(), ex);
         }
     }
     
