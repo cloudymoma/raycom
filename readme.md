@@ -50,7 +50,27 @@ echo "your_elasticsearch_password" > .espass
 
 This file is automatically ignored by git (configured in `.gitignore`) to prevent accidentally committing sensitive credentials. Both the makefile and Elasticsearch setup scripts will read the password from this file, with a fallback to "changeme" if the file doesn't exist.
 
-2. Setup GCP
+2. **Configure Elasticsearch Host** 
+
+Create a `.eshost` file in the project root directory containing your Elasticsearch host URL:
+
+```bash
+echo "https://your-elasticsearch-host.com" > .eshost
+```
+
+This file is automatically ignored by git (configured in `.gitignore`) to prevent accidentally committing sensitive host information. Both the makefile and Elasticsearch setup scripts will read the Elasticsearch host from this file, with a fallback to "https://k8es.ingest.bindiego.com" if the file doesn't exist.
+
+3. **Configure Kibana Host** 
+
+Create a `.kbnhost` file in the project root directory containing your Kibana host URL:
+
+```bash
+echo "https://your-kibana-host.com" > .kbnhost
+```
+
+This file is automatically ignored by git (configured in `.gitignore`) to prevent accidentally committing sensitive host information. The Elasticsearch setup script will read the Kibana host from this file, with a fallback to "https://k8na.bindiego.com" if the file doesn't exist.
+
+4. Setup GCP
 
 You could simply run `cd scripts && ./gcp_setup.sh; cd -`, but before that, make sure the parameters on the top have been updated according to your environment, especially the `project` variable, others are really optional.
 
@@ -60,11 +80,16 @@ So this script will
 - Setup a Stackdriver sink (Pubsub) for HTTP load balancers
 - Grant permissions to the Service Account that been used by the sink, who will publish logs to Pubsub topic
 
-3. Setup Elasticsearch & Kibana
+5. Setup Elasticsearch & Kibana
 
 Same as GCP, there is a script can get the job done. Simply run `cd scripts/elastic && ./init.sh; cd -` then you done. Also, make sure you have updated the parameters on the top of the `init.sh` script according to your Elasticsearch setup.
 
-**Note**: The Elasticsearch setup script will automatically use the password from the `.espass` file you created in step 1. Make sure your Elasticsearch cluster is accessible and the credentials are correct.
+**Note**: Both the makefile and Elasticsearch setup script will automatically use:
+- The password from the `.espass` file you created in step 1
+- The Elasticsearch host from the `.eshost` file you created in step 2 
+- The Kibana host from the `.kbnhost` file you created in step 3 
+
+Make sure your Elasticsearch cluster and Kibana instance are accessible and the credentials are correct.
 
 This script will
 
@@ -91,7 +116,11 @@ Double check the paramters passed to the job trigger in `makefile`, then,
 make df
 ```
 
-**Security Note**: All makefile commands automatically use the Elasticsearch password from your `.espass` file, ensuring secure credential handling across development and production environments.
+**Security Note**: Configuration files are automatically used as follows:
+- **Makefile commands**: Use `.espass` and `.eshost` files for Elasticsearch connection
+- **Setup scripts**: Use `.espass`, `.eshost`, and `.kbnhost` files for complete configuration
+
+This ensures secure credential handling and flexible configuration across development and production environments.
 
 ###### FAQs 常见问题
 
