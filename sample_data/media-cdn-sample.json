@@ -1,0 +1,62 @@
+{
+  "insertId": "617fa16e-0000-2ac9-9993-d4f547fe67d4@a1",
+  "jsonPayload": {
+    "@type": "type.googleapis.com/google.cloud.edgecache.v1.EdgeCacheLogEntry",
+    "tlsVersion": "TLS 1.3",
+    "tlsCipherSuite": "009C", // hex digits for the cipher negotiated
+    "cacheId": "maa-132eed13faa13",
+    "clientAsn": "9299", // AS the client is associated with
+    "origin": "example_origin",
+    "clientRegionCode": "IN",
+    "metroIataCode": "bom",
+    "clientCity": "Mumbai", // City name, in English
+    "latency": "0.005105200s",
+    "proxyStatus": "Google-Edge-Cache",
+    "httpTtfb": "0.005056080s",
+    "cacheMode": "FORCE_CACHE_ALL",
+    "cacheKeyFingerprint": "c360ac18849b6336",
+    "cacheStatus": "hit,stale",
+    "compressionAlgorithmApplied": "br",
+    "enforcedSecurityPolicy": {
+      "outcome": "ACCEPT",
+      "configuredAction": "ACCEPT",
+      "name": "example_policy",
+      "priority": 1000,
+      "configuredAction": "DENY"
+      threatIntelligence: {
+        categories: [
+          0: "iplist-public-clouds"
+        ]
+      }
+    },
+    "originalRequestId": "19d92668-3948-49d8-9244-25f8252043e5",
+    "proxyRegionCode": "IN",
+    "requestId": "4bde6381-cd17-47e1-8c2a-1aaa424a1156",
+    "originIp": "74.125.128.128"
+  },
+  "httpRequest": {
+    "requestMethod": "GET",
+    "requestUrl": "https://example.com/image.jpg",
+    "requestSize": "3545",
+    "status": 200,
+    "responseSize": "3716",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
+    "remoteIp": "62.36.0.43",
+    "protocol": "HTTP/2"
+  },
+  "resource": {
+    "type": "edgecache.googleapis.com/EdgeCacheRouteRule",
+    "labels": {
+      "matched_path": "/",
+      "path_matcher_name": "routes",
+      "service_name": "example_service",
+      "resource_container": "projects/123456789",
+      "location": "global",
+      "route_destination": "projects/123456789/locations/global/edgeCacheOrigins/example_origin",
+      "route_type": "ORIGIN"
+    }
+  },
+  "timestamp": "2022-11-19T00:24:13.695328200Z",
+  "logName": "projects/my-project/logs/edgecache.googleapis.com%2Fedge_cache_request",
+  "receiveTimestamp": "2022-11-19T00:24:16.715871645Z"
+}
