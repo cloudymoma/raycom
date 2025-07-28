@@ -487,6 +487,10 @@ public class ElasticsearchIO {
 
         /** Returns true if the response has the error code for any mutation. */
         private static boolean errorCodePresent(HttpEntity responseEntity, int errorCode) {
+            if (responseEntity == null) {
+                logger.warn("Response entity is null, cannot check for error codes");
+                return false;
+            }
             try {
                 JsonNode json = parseResponse(responseEntity);
                 if (json.path("errors").asBoolean()) {
@@ -497,7 +501,7 @@ public class ElasticsearchIO {
                     }
                 }
             } catch (IOException e) {
-                logger.warn("Could not extract error codes from responseEntity {}", responseEntity);
+                logger.warn("Could not extract error codes from responseEntity {}", responseEntity, e);
             }
             return false;
         }
@@ -811,6 +815,7 @@ public class ElasticsearchIO {
                 int attempt = 0;
                 
                 while (true) {
+                    HttpEntity responseEntity = null;
                     try {
                         HttpEntity entity = new NStringEntity(new String(requestBody, StandardCharsets.UTF_8), 
                             ContentType.APPLICATION_JSON);
@@ -819,9 +824,10 @@ public class ElasticsearchIO {
                         request.setEntity(entity);
                         
                         Response response = restClient.performRequest(request);
+                        responseEntity = response.getEntity();
                         
                         // Check for errors in response
-                        checkForErrors(response.getEntity(), esVersion, false);
+                        checkForErrors(responseEntity, esVersion, false);
                         
                         // Update metrics
                         totalDocuments.addAndGet(docCount);
@@ -843,8 +849,18 @@ public class ElasticsearchIO {
                         logger.warn(RETRY_ATTEMPT_LOG, attempt);
                         
                         // Check if we should retry based on the error
-                        if (spec.getRetryConf() != null && 
-                            spec.getRetryConf().getRetryPredicate().test(null)) {
+                        boolean shouldRetry = false;
+                        if (spec.getRetryConf() != null) {
+                            // Only test retry predicate if we have a response entity
+                            if (responseEntity != null) {
+                                shouldRetry = spec.getRetryConf().getRetryPredicate().test(responseEntity);
+                            } else {
+                                // If no response entity, don't retry for connection failures etc.
+                                shouldRetry = false;
+                            }
+                        }
+                        
+                        if (shouldRetry) {
                             long backoffMillis = backoff.nextBackOffMillis();
                             if (backoffMillis == BackOff.STOP) {
                                 throw new IOException("Backoff exhausted", e);
@@ -872,6 +888,9 @@ public class ElasticsearchIO {
     }
 
     static JsonNode parseResponse(HttpEntity responseEntity) throws IOException {
+        if (responseEntity == null) {
+            throw new IOException("Response entity is null");
+        }
         return mapper.readValue(responseEntity.getContent(), JsonNode.class);
     }
 
