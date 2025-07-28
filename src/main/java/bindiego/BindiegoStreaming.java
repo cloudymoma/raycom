@@ -133,77 +133,113 @@ public class BindiegoStreaming {
                 ObjectNode jsonRoot = (ObjectNode) json;
 
                 // Optional: add timestamp in Elasticsearch's native tongue
-                jsonRoot.put("@timestamp", jsonRoot.get("timestamp").asText());
-                jsonRoot.remove("timestamp");
+                JsonNode timestampNode = jsonRoot.get("timestamp");
+                if (timestampNode != null) {
+                    jsonRoot.put("@timestamp", timestampNode.asText());
+                    jsonRoot.remove("timestamp");
+                }
 
                 // Extract host & protocol from URL
-                URL url = new URL(jsonRoot.get("httpRequest").get("requestUrl").asText());
-                ((ObjectNode) jsonRoot.get("httpRequest")).put("requestDomain", url.getHost());
-                ((ObjectNode) jsonRoot.get("httpRequest")).put("requestProtocol", url.getProtocol());
+                JsonNode httpRequestNode = jsonRoot.get("httpRequest");
+                if (httpRequestNode != null) {
+                    JsonNode requestUrlNode = httpRequestNode.get("requestUrl");
+                    if (requestUrlNode != null) {
+                        URL url = new URL(requestUrlNode.asText());
+                        ((ObjectNode) httpRequestNode).put("requestDomain", url.getHost());
+                        ((ObjectNode) httpRequestNode).put("requestProtocol", url.getProtocol());
+                    }
+                }
 
                 // REVISIT: quick impl, not ideal but works
                 // Extract resource type from URL, e.g. .txt .m4s, .m3u8, .ts, .tar.gz, .js, .html etc.
-                int cutoffLength = 6;
-                String urlStr = jsonRoot.get("httpRequest").get("requestUrl").asText();
-                int urlLength = urlStr.length();
-                if (cutoffLength < urlLength) {
-                    String partialUrl = urlStr.substring(urlLength - cutoffLength);
+                if (httpRequestNode != null) {
+                    JsonNode requestUrlNode = httpRequestNode.get("requestUrl");
+                    if (requestUrlNode != null) {
+                        int cutoffLength = 6;
+                        String urlStr = requestUrlNode.asText();
+                        int urlLength = urlStr.length();
+                        if (cutoffLength < urlLength) {
+                            String partialUrl = urlStr.substring(urlLength - cutoffLength);
 
-                    if (partialUrl.contains(".")) {
-                        ((ObjectNode) jsonRoot.get("httpRequest"))
-                            .put("resourceType", FilenameUtils.getExtension(partialUrl));
+                            if (partialUrl.contains(".")) {
+                                ((ObjectNode) httpRequestNode)
+                                    .put("resourceType", FilenameUtils.getExtension(partialUrl));
+                            }
+                        }
                     }
                 }
 
                 // Extract the backend latency, latency between GFE_layer1 and origin
                 String latency = null;
                 Double backendLatency = null;
-                if (null != jsonRoot.get("httpRequest").get("latency")) {
-                    latency = jsonRoot.get("httpRequest").get("latency").asText();
-                    ((ObjectNode) jsonRoot.get("httpRequest")).remove("latency");
-                } else if (null != jsonRoot.get("jsonPayload").get("latencySeconds")) {
-                    latency = jsonRoot.get("jsonPayload").get("latencySeconds").asText();
-                    ((ObjectNode) jsonRoot.get("jsonPayload")).remove("latencySeconds");
+                JsonNode jsonPayloadNode = jsonRoot.get("jsonPayload");
+                
+                if (httpRequestNode != null) {
+                    JsonNode latencyNode = httpRequestNode.get("latency");
+                    if (latencyNode != null) {
+                        latency = latencyNode.asText();
+                        ((ObjectNode) httpRequestNode).remove("latency");
+                    }
                 }
-                if (null != latency) {
+                
+                if (latency == null && jsonPayloadNode != null) {
+                    JsonNode latencySecondsNode = jsonPayloadNode.get("latencySeconds");
+                    if (latencySecondsNode != null) {
+                        latency = latencySecondsNode.asText();
+                        ((ObjectNode) jsonPayloadNode).remove("latencySeconds");
+                    }
+                }
+                
+                if (latency != null && latency.length() > 0 && httpRequestNode != null) {
                     backendLatency = Double.valueOf(latency.substring(0, latency.length() - 1));
-                    ((ObjectNode) jsonRoot.get("httpRequest"))
-                        .put("backendLatency", backendLatency);
+                    ((ObjectNode) httpRequestNode).put("backendLatency", backendLatency);
                 }
 
                 // backednLatency2, latency between GFE_layer2 and origin
                 Double backendLatency2 = null;
-                if (null != jsonRoot.get("jsonPayload").get("backendLatency")) {
-                    String latency2 = new String(jsonRoot.get("jsonPayload").get("backendLatency").asText());
-                    backendLatency2 = Double.valueOf(latency2.substring(0, latency2.length() - 1));
-                    ((ObjectNode) jsonRoot.get("httpRequest"))
-                        .put("backendLatency2", backendLatency2);
-                    ((ObjectNode) jsonRoot.get("jsonPayload")).remove("backendLatency");
+                if (jsonPayloadNode != null && httpRequestNode != null) {
+                    JsonNode backendLatencyNode = jsonPayloadNode.get("backendLatency");
+                    if (backendLatencyNode != null) {
+                        String latency2 = backendLatencyNode.asText();
+                        if (latency2.length() > 0) {
+                            backendLatency2 = Double.valueOf(latency2.substring(0, latency2.length() - 1));
+                            ((ObjectNode) httpRequestNode).put("backendLatency2", backendLatency2);
+                            ((ObjectNode) jsonPayloadNode).remove("backendLatency");
 
-                    // calculate latency between GFE_layer1 and GFE_layer2
-                    if (null != backendLatency) {
-                        ((ObjectNode) jsonRoot.get("httpRequest"))
-                            .put("gfeLatency", (backendLatency - backendLatency2));
+                            // calculate latency between GFE_layer1 and GFE_layer2
+                            if (backendLatency != null) {
+                                ((ObjectNode) httpRequestNode)
+                                    .put("gfeLatency", (backendLatency - backendLatency2));
+                            }
+                        }
                     }
                 }
 
                 // Frontend SRTT, latency between client and GFE_layer1
                 Double feSrtt = null;
-                if (null != jsonRoot.get("jsonPayload").get("frontendSrtt")) {
-                    String feSrttStr = new String(jsonRoot.get("jsonPayload").get("frontendSrtt").asText());
-                    feSrtt = Double.valueOf(feSrttStr.substring(0, feSrttStr.length() - 1));
-                    ((ObjectNode) jsonRoot.get("httpRequest"))
-                        .put("frontendSrtt", feSrtt);
-                    ((ObjectNode) jsonRoot.get("jsonPayload")).remove("frontendSrtt");
+                if (jsonPayloadNode != null && httpRequestNode != null) {
+                    JsonNode frontendSrttNode = jsonPayloadNode.get("frontendSrtt");
+                    if (frontendSrttNode != null) {
+                        String feSrttStr = frontendSrttNode.asText();
+                        if (feSrttStr.length() > 0) {
+                            feSrtt = Double.valueOf(feSrttStr.substring(0, feSrttStr.length() - 1));
+                            ((ObjectNode) httpRequestNode).put("frontendSrtt", feSrtt);
+                            ((ObjectNode) jsonPayloadNode).remove("frontendSrtt");
+                        }
+                    }
                 }
 
                 // Get CachedID / Pop location ISO3166-1 3-letter city code
-                if (null != jsonRoot.get("jsonPayload").get("cacheId")) {
-                    // REVISIT: test string length
-                    String cachedIdCityCode = new String(jsonRoot.get("jsonPayload").get("cacheId").asText())
-                        .substring(0, 3);
-                    ((ObjectNode) jsonRoot.get("jsonPayload"))
-                        .put("cacheIdCityCode", cachedIdCityCode);
+                if (jsonPayloadNode != null) {
+                    JsonNode cacheIdNode = jsonPayloadNode.get("cacheId");
+                    if (cacheIdNode != null) {
+                        String cacheIdStr = cacheIdNode.asText();
+                        // REVISIT: test string length
+                        if (cacheIdStr.length() >= 3) {
+                            String cachedIdCityCode = cacheIdStr.substring(0, 3);
+                            ((ObjectNode) jsonPayloadNode).put("cacheIdCityCode", cachedIdCityCode);
+                        }
+                    }
                 }
 
                 r.get(STR_OUT).output(mapper.writeValueAsString(json));
