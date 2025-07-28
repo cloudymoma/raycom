@@ -3,13 +3,13 @@
   "jsonPayload": {
     "@type": "type.googleapis.com/google.cloud.edgecache.v1.EdgeCacheLogEntry",
     "tlsVersion": "TLS 1.3",
-    "tlsCipherSuite": "009C", // hex digits for the cipher negotiated
+    "tlsCipherSuite": "009C",
     "cacheId": "maa-132eed13faa13",
-    "clientAsn": "9299", // AS the client is associated with
+    "clientAsn": "9299", 
     "origin": "example_origin",
     "clientRegionCode": "IN",
     "metroIataCode": "bom",
-    "clientCity": "Mumbai", // City name, in English
+    "clientCity": "Mumbai", 
     "latency": "0.005105200s",
     "proxyStatus": "Google-Edge-Cache",
     "httpTtfb": "0.005056080s",
@@ -18,16 +18,10 @@
     "cacheStatus": "hit,stale",
     "compressionAlgorithmApplied": "br",
     "enforcedSecurityPolicy": {
-      "outcome": "ACCEPT",
       "configuredAction": "ACCEPT",
+      "outcome": "ACCEPT",
       "name": "example_policy",
-      "priority": 1000,
-      "configuredAction": "DENY"
-      threatIntelligence: {
-        categories: [
-          0: "iplist-public-clouds"
-        ]
-      }
+      "priority": 2147483647
     },
     "originalRequestId": "19d92668-3948-49d8-9244-25f8252043e5",
     "proxyRegionCode": "IN",
