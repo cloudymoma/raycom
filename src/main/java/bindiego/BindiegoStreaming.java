@@ -94,6 +94,7 @@ import bindiego.io.WindowedFilenamePolicy;
 import bindiego.utils.DurationUtils;
 import bindiego.utils.SchemaParser;
 import bindiego.io.ElasticsearchIO;
+import bindiego.processors.LogDataProcessor;
 
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -112,6 +113,7 @@ public class BindiegoStreaming {
         @Setup 
         public void setup() {
             mapper = new ObjectMapper();
+            processor = new LogDataProcessor();
         }
 
         @ProcessElement
@@ -120,129 +122,17 @@ public class BindiegoStreaming {
 
             String payload = null;
 
-            // TODO: data validation here to prevent later various outputs inconsistency
             try {
                 PubsubMessage psmsg = ctx.element();
-                // GLB json data
                 payload = new String(psmsg.getPayload(), StandardCharsets.UTF_8);
 
                 logger.debug("Extracted raw message: " + payload);
 
-                // JsonNode json = mapper.readValue(payload, JsonNode.class);
                 JsonNode json = mapper.readTree(payload);
                 ObjectNode jsonRoot = (ObjectNode) json;
-
-                // Optional: add timestamp in Elasticsearch's native tongue
-                JsonNode timestampNode = jsonRoot.get("timestamp");
-                if (timestampNode != null) {
-                    jsonRoot.put("@timestamp", timestampNode.asText());
-                    jsonRoot.remove("timestamp");
-                }
-
-                // Extract host & protocol from URL
-                JsonNode httpRequestNode = jsonRoot.get("httpRequest");
-                if (httpRequestNode != null) {
-                    JsonNode requestUrlNode = httpRequestNode.get("requestUrl");
-                    if (requestUrlNode != null) {
-                        URL url = new URL(requestUrlNode.asText());
-                        ((ObjectNode) httpRequestNode).put("requestDomain", url.getHost());
-                        ((ObjectNode) httpRequestNode).put("requestProtocol", url.getProtocol());
-                    }
-                }
-
-                // REVISIT: quick impl, not ideal but works
-                // Extract resource type from URL, e.g. .txt .m4s, .m3u8, .ts, .tar.gz, .js, .html etc.
-                if (httpRequestNode != null) {
-                    JsonNode requestUrlNode = httpRequestNode.get("requestUrl");
-                    if (requestUrlNode != null) {
-                        int cutoffLength = 6;
-                        String urlStr = requestUrlNode.asText();
-                        int urlLength = urlStr.length();
-                        if (cutoffLength < urlLength) {
-                            String partialUrl = urlStr.substring(urlLength - cutoffLength);
-
-                            if (partialUrl.contains(".")) {
-                                ((ObjectNode) httpRequestNode)
-                                    .put("resourceType", FilenameUtils.getExtension(partialUrl));
-                            }
-                        }
-                    }
-                }
-
-                // Extract the backend latency, latency between GFE_layer1 and origin
-                String latency = null;
-                Double backendLatency = null;
-                JsonNode jsonPayloadNode = jsonRoot.get("jsonPayload");
-                
-                if (httpRequestNode != null) {
-                    JsonNode latencyNode = httpRequestNode.get("latency");
-                    if (latencyNode != null) {
-                        latency = latencyNode.asText();
-                        ((ObjectNode) httpRequestNode).remove("latency");
-                    }
-                }
-                
-                if (latency == null && jsonPayloadNode != null) {
-                    JsonNode latencySecondsNode = jsonPayloadNode.get("latencySeconds");
-                    if (latencySecondsNode != null) {
-                        latency = latencySecondsNode.asText();
-                        ((ObjectNode) jsonPayloadNode).remove("latencySeconds");
-                    }
-                }
-                
-                if (latency != null && latency.length() > 0 && httpRequestNode != null) {
-                    backendLatency = Double.valueOf(latency.substring(0, latency.length() - 1));
-                    ((ObjectNode) httpRequestNode).put("backendLatency", backendLatency);
-                }
-
-                // backednLatency2, latency between GFE_layer2 and origin
-                Double backendLatency2 = null;
-                if (jsonPayloadNode != null && httpRequestNode != null) {
-                    JsonNode backendLatencyNode = jsonPayloadNode.get("backendLatency");
-                    if (backendLatencyNode != null) {
-                        String latency2 = backendLatencyNode.asText();
-                        if (latency2.length() > 0) {
-                            backendLatency2 = Double.valueOf(latency2.substring(0, latency2.length() - 1));
-                            ((ObjectNode) httpRequestNode).put("backendLatency2", backendLatency2);
-                            ((ObjectNode) jsonPayloadNode).remove("backendLatency");
-
-                            // calculate latency between GFE_layer1 and GFE_layer2
-                            if (backendLatency != null) {
-                                ((ObjectNode) httpRequestNode)
-                                    .put("gfeLatency", (backendLatency - backendLatency2));
-                            }
-                        }
-                    }
-                }
-
-                // Frontend SRTT, latency between client and GFE_layer1
-                Double feSrtt = null;
-                if (jsonPayloadNode != null && httpRequestNode != null) {
-                    JsonNode frontendSrttNode = jsonPayloadNode.get("frontendSrtt");
-                    if (frontendSrttNode != null) {
-                        String feSrttStr = frontendSrttNode.asText();
-                        if (feSrttStr.length() > 0) {
-                            feSrtt = Double.valueOf(feSrttStr.substring(0, feSrttStr.length() - 1));
-                            ((ObjectNode) httpRequestNode).put("frontendSrtt", feSrtt);
-                            ((ObjectNode) jsonPayloadNode).remove("frontendSrtt");
-                        }
-                    }
-                }
-
-                // Get CachedID / Pop location ISO3166-1 3-letter city code
-                if (jsonPayloadNode != null) {
-                    JsonNode cacheIdNode = jsonPayloadNode.get("cacheId");
-                    if (cacheIdNode != null) {
-                        String cacheIdStr = cacheIdNode.asText();
-                        // REVISIT: test string length
-                        if (cacheIdStr.length() >= 3) {
-                            String cachedIdCityCode = cacheIdStr.substring(0, 3);
-                            ((ObjectNode) jsonPayloadNode).put("cacheIdCityCode", cachedIdCityCode);
-                        }
-                    }
-                }
-
-                r.get(STR_OUT).output(mapper.writeValueAsString(json));
+                processor.processLogData(jsonRoot);
+                String processedPayload = mapper.writeValueAsString(json);
+                r.get(STR_OUT).output(processedPayload);
 
                 // use this only if the element doesn't have an event timestamp attached to it
                 // e.g. extract 'extractedTs' from psmsg.split(",")[0] from a CSV payload
@@ -258,6 +148,7 @@ public class BindiegoStreaming {
         }
 
         private ObjectMapper mapper;
+        private LogDataProcessor processor;
     }
 
     static void run(BindiegoStreamingOptions options) throws Exception {
