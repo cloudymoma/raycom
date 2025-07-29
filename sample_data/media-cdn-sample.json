@@ -1,56 +1,217 @@
-{
-  "insertId": "617fa16e-0000-2ac9-9993-d4f547fe67d4@a1",
-  "jsonPayload": {
-    "@type": "type.googleapis.com/google.cloud.edgecache.v1.EdgeCacheLogEntry",
-    "tlsVersion": "TLS 1.3",
-    "tlsCipherSuite": "009C",
-    "cacheId": "maa-132eed13faa13",
-    "clientAsn": "9299", 
-    "origin": "example_origin",
-    "clientRegionCode": "IN",
-    "metroIataCode": "bom",
-    "clientCity": "Mumbai", 
-    "latency": "0.005105200s",
-    "proxyStatus": "Google-Edge-Cache",
-    "httpTtfb": "0.005056080s",
-    "cacheMode": "FORCE_CACHE_ALL",
-    "cacheKeyFingerprint": "c360ac18849b6336",
-    "cacheStatus": "hit,stale",
-    "compressionAlgorithmApplied": "br",
-    "enforcedSecurityPolicy": {
-      "configuredAction": "ACCEPT",
-      "outcome": "ACCEPT",
-      "name": "example_policy",
-      "priority": 2147483647
+[
+  // Sample Media CDN (Edge Cache) log entries from Google Cloud Platform
+  // These logs demonstrate various cache behaviors and edge cache routing scenarios
+  // Reference: https://cloud.google.com/media-cdn/docs/logging#cache-fields
+  
+  // Entry 1: Cache hit with stale content and compression
+  {
+    "insertId": "617fa16e-0000-2ac9-9993-d4f547fe67d4@a1",
+    "jsonPayload": {
+      "@type": "type.googleapis.com/google.cloud.edgecache.v1.EdgeCacheLogEntry",
+      "tlsVersion": "TLS 1.3",
+      "tlsCipherSuite": "009C",
+      "cacheId": "maa-132eed13faa13",
+      "clientAsn": "9299", 
+      "origin": "example_origin",
+      "clientRegionCode": "IN",
+      "metroIataCode": "bom",
+      "clientCity": "Mumbai", 
+      "latency": "0.005105200s",
+      "proxyStatus": "Google-Edge-Cache",
+      "httpTtfb": "0.005056080s",
+      "cacheMode": "FORCE_CACHE_ALL",
+      "cacheKeyFingerprint": "c360ac18849b6336",
+      "cacheStatus": "hit,stale",
+      "compressionAlgorithmApplied": "br",
+      "enforcedSecurityPolicy": {
+        "configuredAction": "ACCEPT",
+        "outcome": "ACCEPT",
+        "name": "example_policy",
+        "priority": 2147483647
+      },
+      "originalRequestId": "19d92668-3948-49d8-9244-25f8252043e5",
+      "proxyRegionCode": "IN",
+      "requestId": "4bde6381-cd17-47e1-8c2a-1aaa424a1156",
+      "originIp": "74.125.128.128"
     },
-    "originalRequestId": "19d92668-3948-49d8-9244-25f8252043e5",
-    "proxyRegionCode": "IN",
-    "requestId": "4bde6381-cd17-47e1-8c2a-1aaa424a1156",
-    "originIp": "74.125.128.128"
+    "httpRequest": {
+      "requestMethod": "GET",
+      "requestUrl": "https://example.com/image.jpg",
+      "requestSize": "3545",
+      "status": 200,
+      "responseSize": "3716",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
+      "remoteIp": "62.36.0.43",
+      "protocol": "HTTP/2"
+    },
+    "resource": {
+      "type": "edgecache.googleapis.com/EdgeCacheRouteRule",
+      "labels": {
+        "matched_path": "/",
+        "path_matcher_name": "routes",
+        "service_name": "example_service",
+        "resource_container": "projects/123456789",
+        "location": "global",
+        "route_destination": "projects/123456789/locations/global/edgeCacheOrigins/example_origin",
+        "route_type": "ORIGIN"
+      }
+    },
+    "timestamp": "2022-11-19T00:24:13.695328200Z",
+    "logName": "projects/my-project/logs/edgecache.googleapis.com%2Fedge_cache_request",
+    "receiveTimestamp": "2022-11-19T00:24:16.715871645Z"
   },
-  "httpRequest": {
-    "requestMethod": "GET",
-    "requestUrl": "https://example.com/image.jpg",
-    "requestSize": "3545",
-    "status": 200,
-    "responseSize": "3716",
-    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
-    "remoteIp": "62.36.0.43",
-    "protocol": "HTTP/2"
+  
+  // Entry 2: Cache miss scenario with multi-hop routing (Singapore -> Hong Kong)
+  // Shows latency metrics and cache miss behavior for large image file
+  {
+    "insertId": "73dc1466-0000-23e6-b909-582429a8c900@a1",
+    "jsonPayload": {
+      "latency": "4.869127757s",
+      "cacheId": "sin,sin-112074fd, hkg",
+      "clientCity": "Beijing",
+      "tlsVersion": "TLS 1.3",
+      "@type": "type.googleapis.com/google.cloud.edgecache.v1.EdgeCacheLogEntry",
+      "originIp": "34.149.242.252",
+      "proxyStatus": "Google-Edge-Cache-Origin; next-hop=new.yinghli.cn; next-protocol=h2; received-status=200, Google-Edge-Cache",
+      "enforcedSecurityPolicy": {
+        "configuredAction": "ACCEPT",
+        "name": "no_policy",
+        "outcome": "ACCEPT",
+        "priority": 2147483647
+      },
+      "clientRegionCode": "CN",
+      "cacheStatus": "miss,miss,uncacheable",
+      "proxyRegionCode": "HK",
+      "cacheKeyFingerprint": "1e7f3939c56badf",
+      "metroIataCode": "HKG",
+      "httpTtfb": "0.487890707s",
+      "clientAsn": "41264",
+      "requestId": "9c07f9d6-c976-4fc4-a448-57aa71525470",
+      "cacheMode": "FORCE_CACHE_ALL",
+      "origin": "new-origin"
+    },
+    "httpRequest": {
+      "requestMethod": "GET",
+      "requestUrl": "https://infoq.yinghli.cn/rail.jpg",
+      "requestSize": "2659",
+      "status": 200,
+      "responseSize": "25684342",
+      "userAgent": "curl/8.11.2-DEV",
+      "remoteIp": "203.208.61.59",
+      "protocol": "HTTP/2"
+    },
+    "resource": {
+      "type": "edgecache.googleapis.com/EdgeCacheRouteRule",
+      "labels": {
+        "location": "asia-southeast1",
+        "path_matcher_name": "path-matcher-0",
+        "service_name": "infoq",
+        "resource_container": "projects/256146349297",
+        "route_destination": "projects/256146349297/locations/global/edgeCacheOrigins/new-origin",
+        "matched_path": "/",
+        "route_type": "ORIGIN"
+      }
+    },
+    "timestamp": "2025-07-29T03:31:23.779968757Z",
+    "logName": "projects/nimble-unison-325208/logs/edgecache.googleapis.com%2Fedge_cache_request",
+    "trace": "projects/256146349297/traces/9c07f9d6-c976-4fc4-a448-57aa71525470",
+    "receiveTimestamp": "2025-07-29T03:31:33.681105102Z"
   },
-  "resource": {
-    "type": "edgecache.googleapis.com/EdgeCacheRouteRule",
-    "labels": {
-      "matched_path": "/",
-      "path_matcher_name": "routes",
-      "service_name": "example_service",
-      "resource_container": "projects/123456789",
-      "location": "global",
-      "route_destination": "projects/123456789/locations/global/edgeCacheOrigins/example_origin",
-      "route_type": "ORIGIN"
-    }
+  
+  // Entry 3: Range request (HTTP 206) with backend latency metrics
+  // Demonstrates partial content delivery and backend timing
+  {
+    "insertId": "3777982641417486009@a1",
+    "jsonPayload": {
+      "rangeHeader": "bytes=20971360-23068495",
+      "originIp": "34.149.242.252",
+      "requestId": "9c07f9d6-c976-4fc4-a448-57aa71525470",
+      "proxyStatus": "Google-Edge-Cache-Origin; next-hop=new.yinghli.cn; next-protocol=h2; received-status=206",
+      "backendLatency": "0.096219156s",
+      "backendInitialLatency": "0.079768168s",
+      "@type": "type.googleapis.com/google.cloud.edgecache.v1.EdgeCacheLogEntry",
+      "flexShieldingStatus": "DEFAULT_GLOBAL"
+    },
+    "httpRequest": {
+      "requestMethod": "GET",
+      "requestUrl": "https://new.yinghli.cn/rail.jpg",
+      "requestSize": "234",
+      "status": 206,
+      "responseSize": "2097455",
+      "protocol": "HTTP/2"
+    },
+    "resource": {
+      "type": "edgecache.googleapis.com/EdgeCacheRouteRule",
+      "labels": {
+        "resource_container": "projects/256146349297",
+        "route_type": "ORIGIN",
+        "location": "global",
+        "matched_path": "/",
+        "route_destination": "new.yinghli.cn",
+        "service_name": "infoq",
+        "path_matcher_name": "path-matcher-0"
+      }
+    },
+    "timestamp": "2025-07-29T03:31:22.846293586Z",
+    "logName": "projects/nimble-unison-325208/logs/edgecache.googleapis.com%2Fedge_cache_request",
+    "receiveTimestamp": "2025-07-29T03:31:23.618495615Z"
   },
-  "timestamp": "2022-11-19T00:24:13.695328200Z",
-  "logName": "projects/my-project/logs/edgecache.googleapis.com%2Fedge_cache_request",
-  "receiveTimestamp": "2022-11-19T00:24:16.715871645Z"
-}
+  
+  // Entry 4: Cache hit with original request correlation
+  // Shows successful cache hit scenario with request tracing
+  {
+    "insertId": "70c7d406-0000-23f1-8369-d4f547fa3c3c@a1",
+    "jsonPayload": {
+      "httpTtfb": "0.029530678s",
+      "requestId": "67f37dff-f01c-4dd6-b184-ca158be4f90b",
+      "proxyRegionCode": "HK",
+      "clientRegionCode": "CN",
+      "metroIataCode": "HKG",
+      "proxyStatus": "Google-Edge-Cache",
+      "latency": "1.814372305s",
+      "tlsVersion": "TLS 1.3",
+      "cacheStatus": "hit,uncacheable",
+      "@type": "type.googleapis.com/google.cloud.edgecache.v1.EdgeCacheLogEntry",
+      "cacheMode": "FORCE_CACHE_ALL",
+      "cacheKeyFingerprint": "1e7f3939c56badf",
+      "originIp": "34.149.242.252",
+      "clientAsn": "41264",
+      "origin": "new-origin",
+      "originalRequestId": "9c07f9d6-c976-4fc4-a448-57aa71525470",
+      "enforcedSecurityPolicy": {
+        "name": "no_policy",
+        "configuredAction": "ACCEPT",
+        "outcome": "ACCEPT",
+        "priority": 2147483647
+      },
+      "cacheId": "hkg-e9bd1825, hkg",
+      "clientCity": "Beijing"
+    },
+    "httpRequest": {
+      "requestMethod": "GET",
+      "requestUrl": "https://infoq.yinghli.cn/rail.jpg",
+      "requestSize": "2425",
+      "status": 200,
+      "responseSize": "25684247",
+      "userAgent": "curl/8.11.2-DEV",
+      "remoteIp": "203.208.61.59",
+      "protocol": "HTTP/2"
+    },
+    "resource": {
+      "type": "edgecache.googleapis.com/EdgeCacheRouteRule",
+      "labels": {
+        "route_destination": "projects/256146349297/locations/global/edgeCacheOrigins/new-origin",
+        "route_type": "ORIGIN",
+        "resource_container": "projects/256146349297",
+        "location": "asia-southeast1",
+        "matched_path": "/",
+        "path_matcher_name": "path-matcher-0",
+        "service_name": "infoq"
+      }
+    },
+    "timestamp": "2025-07-29T03:36:51.780523305Z",
+    "logName": "projects/nimble-unison-325208/logs/edgecache.googleapis.com%2Fedge_cache_request",
+    "trace": "projects/256146349297/traces/67f37dff-f01c-4dd6-b184-ca158be4f90b",
+    "receiveTimestamp": "2025-07-29T03:36:55.311652604Z"
+  }
+]
