@@ -1,0 +1,764 @@
+{
+  "BigQuery Schema": [
+    {
+      "mode": "NULLABLE",
+      "name": "event_date",
+      "type": "STRING",
+      "description": "The date when the event was logged (YYYYMMDD format in the registered timezone of your app)."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "event_timestamp",
+      "type": "INTEGER",
+      "description": "The time (in microseconds, UTC) when the event was received by Google Analytics."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "event_ts",
+      "type": "TIMESTAMP",
+      "description": "The timestamp (event_timestamp in seconds, UTC) when the event was logged. used for BQ time based partitioning."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "event_name",
+      "type": "STRING",
+      "description": "The name of the event."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "key",
+          "type": "STRING",
+          "description": "The name of the event parameter."
+        },
+        {
+          "fields": [
+            {
+              "mode": "NULLABLE",
+              "name": "string_value",
+              "type": "STRING",
+              "description": "If the event parameter is represented by a string, such as a URL or campaign name, it is populated in this field."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "int_value",
+              "type": "INTEGER",
+              "description": "If the event parameter is represented by an integer, it is populated in this field."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "float_value",
+              "type": "FLOAT",
+              "description": "If the event parameter is represented by a floating point value, it is populated in this field. This field is not currently in use."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "double_value",
+              "type": "FLOAT",
+              "description": "If the event parameter is represented by a double value, it is populated in this field."
+            }
+          ],
+          "mode": "NULLABLE",
+          "name": "value",
+          "type": "RECORD",
+          "description": "A record containing the event parameter's value."
+        }
+      ],
+      "mode": "REPEATED",
+      "name": "event_params",
+      "type": "RECORD",
+      "description": "The event_params RECORD can store campaign-level and contextual event parameters as well as any user-defined event parameters. The event_params RECORD is repeated for each key that is associated with an event."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "event_previous_timestamp",
+      "type": "INTEGER",
+      "description": "The time (in microseconds, UTC) when the previous event happened."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "event_value_in_usd",
+      "type": "FLOAT",
+      "description": "The currency-converted value (in USD) of the event's \"value\" parameter."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "event_bundle_sequence_id",
+      "type": "INTEGER",
+      "description": "The sequential ID of the bundle in which these events were uploaded."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "event_server_timestamp_offset",
+      "type": "INTEGER",
+      "description": "Timestamp offset between collection time and upload time in micros."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "user_id",
+      "type": "STRING",
+      "description": "The unique ID assigned to a user."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "user_pseudo_id",
+      "type": "STRING",
+      "description": "The pseudonymous id (e.g., app instance ID) for the user. A unique identifier that is assigned to a user when they first open the app or visit the site."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "analytics_storage",
+          "type": "STRING",
+          "description": "Whether Analytics storage is enabled for the user."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "ads_storage",
+          "type": "STRING",
+          "description": "Whether ad targeting is enabled for a user."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "uses_transient_token",
+          "type": "STRING",
+          "description": "Whether a web user has denied Analytics storage and the developer has enabled measurement without cookies based on transient tokens in server data."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "privacy_info",
+      "type": "RECORD",
+      "description": "The privacy_info fields contain information based on the consent status of a user when consent mode is enabled."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "key",
+          "type": "STRING",
+          "description": "The name of the user property."
+        },
+        {
+          "fields": [
+            {
+              "mode": "NULLABLE",
+              "name": "string_value",
+              "type": "STRING",
+              "description": "The string value of the user property."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "int_value",
+              "type": "INTEGER",
+              "description": "The integer value of the user property."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "float_value",
+              "type": "FLOAT",
+              "description": "This field is currently unused."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "double_value",
+              "type": "FLOAT",
+              "description": "The double value of the user property."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "set_timestamp_micros",
+              "type": "INTEGER",
+              "description": "The time (in microseconds) at which the user property was last set."
+            }
+          ],
+          "mode": "NULLABLE",
+          "name": "value",
+          "type": "RECORD",
+          "description": "A record for the user property value."
+        }
+      ],
+      "mode": "REPEATED",
+      "name": "user_properties",
+      "type": "RECORD",
+      "description": "The user_properties RECORD contains any user properties that you have set. It is repeated for each key that is associated with a user."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "user_first_touch_timestamp",
+      "type": "INTEGER",
+      "description": "The time (in microseconds) at which the user first opened the app or visited the site."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "revenue",
+          "type": "FLOAT",
+          "description": "The Lifetime Value (revenue) of the user. This field is not populated in intraday tables."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "currency",
+          "type": "STRING",
+          "description": "The Lifetime Value (currency) of the user. This field is not populated in intraday tables."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "user_ltv",
+      "type": "RECORD",
+      "description": "The user_ltv RECORD contains Lifetime Value information about the user. This RECORD is not populated in intraday tables."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "category",
+          "type": "STRING",
+          "description": "The device category (mobile, tablet, desktop)."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "mobile_brand_name",
+          "type": "STRING",
+          "description": "The device brand name."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "mobile_model_name",
+          "type": "STRING",
+          "description": "The device model name."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "mobile_marketing_name",
+          "type": "STRING",
+          "description": "The device marketing name."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "mobile_os_hardware_model",
+          "type": "STRING",
+          "description": "The device model information retrieved directly from the operating system."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "operating_system",
+          "type": "STRING",
+          "description": "The operating system of the device."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "operating_system_version",
+          "type": "STRING",
+          "description": "The OS version."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "vendor_id",
+          "type": "STRING",
+          "description": "IDFV (present only if IDFA is not collected)."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "advertising_id",
+          "type": "STRING",
+          "description": "Advertising ID/IDFA."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "language",
+          "type": "STRING",
+          "description": "The OS language."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "is_limited_ad_tracking",
+          "type": "STRING",
+          "description": "The device's Limit Ad Tracking setting."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "time_zone_offset_seconds",
+          "type": "INTEGER",
+          "description": "The offset from GMT in seconds."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "browser",
+          "type": "STRING",
+          "description": "The browser in which the user viewed content."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "browser_version",
+          "type": "STRING",
+          "description": "The version of the browser in which the user viewed content."
+        },
+        {
+          "fields": [
+            {
+              "mode": "NULLABLE",
+              "name": "browser",
+              "type": "STRING",
+              "description": "The browser in which the user viewed content."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "browser_version",
+              "type": "STRING",
+              "description": "The version of the browser in which the user viewed content."
+            },
+            {
+              "mode": "NULLABLE",
+              "name": "hostname",
+              "type": "STRING",
+              "description": "The hostname associated with the logged event."
+            }
+          ],
+          "mode": "NULLABLE",
+          "name": "web_info",
+          "type": "RECORD",
+          "description": "Web information."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "device",
+      "type": "RECORD",
+      "description": "The device RECORD contains information about the device from which the event originated."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "continent",
+          "type": "STRING",
+          "description": "The continent from which events were reported, based on IP address."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "country",
+          "type": "STRING",
+          "description": "The country from which events were reported, based on IP address."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "region",
+          "type": "STRING",
+          "description": "The region from which events were reported, based on IP address."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "city",
+          "type": "STRING",
+          "description": "The city from which events were reported, based on IP address."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "sub_continent",
+          "type": "STRING",
+          "description": "The subcontinent from which events were reported, based on IP address."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "metro",
+          "type": "STRING",
+          "description": "The metro from which events were reported, based on IP address."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "geo",
+      "type": "RECORD",
+      "description": "The geo RECORD contains information about the geographic location where the event was initiated."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "id",
+          "type": "STRING",
+          "description": "The package name or bundle ID of the app."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "version",
+          "type": "STRING",
+          "description": "The app's versionName (Android) or short bundle version."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "install_store",
+          "type": "STRING",
+          "description": "The store that installed the app."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "firebase_app_id",
+          "type": "STRING",
+          "description": "The Firebase App ID associated with the app"
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "install_source",
+          "type": "STRING",
+          "description": "The store that installed the app."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "app_info",
+      "type": "RECORD",
+      "description": "The app_info RECORD contains information about the app in which the event was initiated."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "name",
+          "type": "STRING",
+          "description": "Name of the marketing campaign that first acquired the user. This field is not populated in intraday tables."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "medium",
+          "type": "STRING",
+          "description": "Name of the medium (paid search, organic search, email, etc.) that first acquired the user. This field is not populated in intraday tables."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "source",
+          "type": "STRING",
+          "description": "Name of the network that first acquired the user. This field is not populated in intraday tables."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "traffic_source",
+      "type": "RECORD",
+      "description": "The traffic_source RECORD contains information about the traffic source that first acquired the user. This record is not populated in intraday tables."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "stream_id",
+      "type": "STRING",
+      "description": "The numeric ID of the data stream from which the event originated."
+    },
+    {
+      "mode": "NULLABLE",
+      "name": "platform",
+      "type": "STRING",
+      "description": "The data stream platform (Web, IOS or Android) from which the event originated."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "hostname",
+          "type": "STRING"
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "event_dimensions",
+      "type": "RECORD"
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "total_item_quantity",
+          "type": "INTEGER",
+          "description": "Total number of items in this event, which is the sum of items.quantity."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "purchase_revenue_in_usd",
+          "type": "FLOAT",
+          "description": "Purchase revenue of this event, represented in USD with standard unit. Populated for purchase event only."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "purchase_revenue",
+          "type": "FLOAT",
+          "description": "Purchase revenue of this event, represented in local currency with standard unit. Populated for purchase event only."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "refund_value_in_usd",
+          "type": "FLOAT",
+          "description": "The amount of refund in this event, represented in USD with standard unit. Populated for refund event only."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "refund_value",
+          "type": "FLOAT",
+          "description": "The amount of refund in this event, represented in local currency with standard unit. Populated for refund event only."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "shipping_value_in_usd",
+          "type": "FLOAT",
+          "description": "The shipping cost in this event, represented in USD with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "shipping_value",
+          "type": "FLOAT",
+          "description": "The shipping cost in this event, represented in local currency."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "tax_value_in_usd",
+          "type": "FLOAT",
+          "description": "The tax value in this event, represented in USD with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "tax_value",
+          "type": "FLOAT",
+          "description": "The tax value in this event, represented in local currency with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "unique_items",
+          "type": "INTEGER",
+          "description": "The number of unique items in this event, based on item_id, item_name, and item_brand."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "transaction_id",
+          "type": "STRING",
+          "description": "The transaction ID of the ecommerce transaction."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "ecommerce",
+      "type": "RECORD",
+      "description": "This ecommerce RECORD contains information about any ecommerce events that have been setup on a website or app."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "item_id",
+          "type": "STRING",
+          "description": "The ID of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_name",
+          "type": "STRING",
+          "description": "The name of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_brand",
+          "type": "STRING",
+          "description": "The brand of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_variant",
+          "type": "STRING",
+          "description": "The variant of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_category",
+          "type": "STRING",
+          "description": "The category of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_category2",
+          "type": "STRING",
+          "description": "The sub category of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_category3",
+          "type": "STRING",
+          "description": "The sub category of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_category4",
+          "type": "STRING",
+          "description": "The sub category of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_category5",
+          "type": "STRING",
+          "description": "The sub category of the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "price_in_usd",
+          "type": "FLOAT",
+          "description": "The price of the item, in USD with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "price",
+          "type": "FLOAT",
+          "description": "The price of the item in local currency."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "quantity",
+          "type": "INTEGER",
+          "description": "The quantity of the item. Quantity set to 1 if not specified."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_revenue_in_usd",
+          "type": "FLOAT",
+          "description": "The revenue of this item, calculated as price_in_usd * quantity. It is populated for purchase events only, in USD with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_revenue",
+          "type": "FLOAT",
+          "description": "The revenue of this item, calculated as price * quantity. It is populated for purchase events only, in local currency with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_refund_in_usd",
+          "type": "FLOAT",
+          "description": "The refund value of this item, calculated as price_in_usd * quantity. It is populated for refund events only, in USD with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_refund",
+          "type": "FLOAT",
+          "description": "The refund value of this item, calculated as price * quantity. It is populated for refund events only, in local currency with standard unit."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "coupon",
+          "type": "STRING",
+          "description": "Coupon code applied to this item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "affiliation",
+          "type": "STRING",
+          "description": "A product affiliation to designate a supplying company or brick and mortar store location."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "location_id",
+          "type": "STRING",
+          "description": "The location associated with the item."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_list_id",
+          "type": "STRING",
+          "description": "The ID of the list in which the item was presented to the user."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_list_name",
+          "type": "STRING",
+          "description": "The name of the list in which the item was presented to the user."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "item_list_index",
+          "type": "STRING",
+          "description": "The position of the item in a list."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "promotion_id",
+          "type": "STRING",
+          "description": "The ID of a product promotion."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "promotion_name",
+          "type": "STRING",
+          "description": "The name of a product promotion."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "creative_name",
+          "type": "STRING",
+          "description": "The name of a creative used in a promotional spot."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "creative_slot",
+          "type": "STRING",
+          "description": "The name of a creative slot."
+        }
+      ],
+      "mode": "REPEATED",
+      "name": "items",
+      "type": "RECORD",
+      "description": "The items RECORD contains information about items included in an event. It is repeated for each item."
+    },
+    {
+      "fields": [
+        {
+          "mode": "NULLABLE",
+          "name": "manual_campaign_id",
+          "type": "STRING",
+          "description": "The manual campaign id (utm_id) that was collected with the event."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "manual_campaign_name",
+          "type": "STRING",
+          "description": "The manual campaign name (utm_campaign) that was collected with the event."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "manual_source",
+          "type": "STRING",
+          "description": "The manual campaign source (utm_source) that was collected with the event. Also includes parsed parameters from referral params, not just UTM values."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "manual_medium",
+          "type": "STRING",
+          "description": "The manual campaign medium (utm_medium) that was collected with the event. Also includes parsed parameters from referral params, not just UTM values."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "manual_term",
+          "type": "STRING",
+          "description": "The manual campaign keyword/term (utm_term) that was collected with the event."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "manual_content",
+          "type": "STRING",
+          "description": "The additional manual campaign metadata (utm_content) that was collected with the event."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "gclid",
+          "type": "STRING",
+          "description": "The Google click identifier that was collected with the event."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "dclid",
+          "type": "STRING",
+          "description": "The DoubleClick Click Identifier for Display and Video 360 and Campaign Manager 360 that was collected with the event."
+        },
+        {
+          "mode": "NULLABLE",
+          "name": "srsltid",
+          "type": "STRING",
+          "description": "The Google Merchant Center identifier that was collected with the event."
+        }
+      ],
+      "mode": "NULLABLE",
+      "name": "collected_traffic_source",
+      "type": "RECORD",
+      "description": "The collected_traffic_source RECORD contains the traffic source data that was present within the events that were collected."
+    }
+  ]
+}
