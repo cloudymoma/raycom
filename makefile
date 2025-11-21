@@ -31,8 +31,8 @@ clean:
 build:
 	@mvn compile
 
-dfup: build
-	@mvn -Pdataflow-runner compile exec:java \
+define run_dataflow
+mvn -Pdataflow-runner compile exec:java \
         -Dexec.mainClass=bindiego.BindiegoStreaming \
         -Dexec.cleanupDaemonThreads=false \
         -Dexec.args="--project=$(gcp_project) \
@@ -81,66 +81,17 @@ dfup: build
         --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
         --defaultWorkerLogLevel=INFO \
         --jobName=$(job)-$(bqWriteMethod) \
-        --update \
+        $(1) \
         --region=$(region) \
         --isBasic=$(isBasic) \
         --bqWriteMethod=$(bqWriteMethod)"
-#--workerZone=$(region)-$(workerZone) \
+endef
+
+dfup: build
+	@$(call run_dataflow,--update)
 
 df: build
-	@mvn -Pdataflow-runner compile exec:java \
-        -Dexec.mainClass=bindiego.BindiegoStreaming \
-        -Dexec.cleanupDaemonThreads=false \
-        -Dexec.args="--project=$(gcp_project) \
-        --streaming=true \
-        --enableStreamingEngine \
-        --autoscalingAlgorithm=THROUGHPUT_BASED \
-        --maxNumWorkers=20 \
-        --workerMachineType=$(workerType) \
-        --diskSizeGb=64 \
-        --numWorkers=3 \
-        --tempLocation=gs://$(gcs_bucket)/tmp/ \
-        --gcpTempLocation=gs://$(gcs_bucket)/tmp/gcp/ \
-        --gcsTempLocation=gs://$(gcs_bucket)/tmp/gcs/ \
-        --stagingLocation=gs://$(gcs_bucket)/staging/ \
-        --runner=DataflowRunner \
-        --experiments=use_runner_v2 \
-        --experiments=enable_data_sampling \
-        --topic=projects/$(gcp_project)/topics/$(pubsub_topic) \
-        --subscription=projects/$(gcp_project)/subscriptions/$(pubsub_sub) \
-        --numShards=1 \
-        --windowSize=6s \
-        --allowedLateness=8s \
-        --earlyFiringPeriod=2s \
-        --lateFiringCount=1 \
-        --filenamePrefix=raycom. \
-        --outputDir=gs://$(gcs_bucket)/raycom/out/ \
-        --errOutputDir=gs://$(gcs_bucket)/raycom/out/err/ \
-        --bqSchema=gs://$(gcs_bucket)/raycom/schemas/$(bq_firebase_schema) \
-        --bqOutputTable=$(gcp_project):raycom.firebase_rt \
-        --storageWriteApiTriggeringFrequencySec=$(bq_storageWriteApiTriggeringFrequencySec) \
-        --avroSchema=gs://$(gcs_bucket)/raycom/schemas/dingoactions.avsc \
-        --btInstanceId=$(bigtable_instance) \
-        --btTableIdTall=bttall \
-        --btTableIdWide=btwide \
-        --jdbcClass=com.mysql.cj.jdbc.Driver \
-        --jdbcConn=$(jdbcuri) \
-        --jdbcUsername=$(jdbcusr) \
-        --jdbcPassword=$(jdbcpwd) \
-        --esHost=$(eshost) \
-        --esUser=$(esuser) \
-        --esPass=$(espass) \
-        --esIndex=$(esindex) \
-        --esMaxBatchSize=$(esBatchSize) \
-        --esMaxBatchBytes=$(esBatchBytes) \
-        --esNumThread=$(esNumThread) \
-        --esIsIgnoreInsecureSSL=$(esIsIgnoreInsecureSSL) \
-        --defaultWorkerLogLevel=INFO \
-        --jobName=$(job)-$(bqWriteMethod) \
-        --region=$(region) \
-        --isBasic=$(isBasic) \
-        --bqWriteMethod=$(bqWriteMethod)"
-#--workerZone=$(region)-$(workerZone) \
+	@$(call run_dataflow,)
 
 cancel:
 	@gcloud dataflow jobs cancel $(job)-$(bqWriteMethod) --region=$(region)
