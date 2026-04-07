@@ -28,6 +28,7 @@ import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
 import org.apache.http.ssl.SSLContextBuilder;
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.message.BasicHeader;
+import org.apache.http.util.EntityUtils;
 
 import com.google.auto.value.AutoValue;
 
@@ -188,6 +189,21 @@ public class ElasticsearchIO {
         // added for ignore self-signed certs
         public abstract boolean isIgnoreInsecureSSL();
 
+        /** Redact sensitive fields to prevent credential leaks via logging or exceptions. */
+        @Override
+        public String toString() {
+            return "ConnectionConf{address=" + getAddress()
+                + ", index=" + getIndex()
+                + ", username=" + getUsername()
+                + ", password=" + (getPassword() != null ? "***" : "null")
+                + ", apiKey=" + (getApiKey() != null ? "***" : "null")
+                + ", keystorePassword=" + (getKeystorePassword() != null ? "***" : "null")
+                + ", keystorePath=" + getKeystorePath()
+                + ", ignoreInsecureSSL=" + isIgnoreInsecureSSL()
+                + ", trustSelfSignedCerts=" + isTrustSelfSignedCerts()
+                + "}";
+        }
+
         /**
          * Connection pooling key for client reuse. Includes all security-relevant fields
          * so that connections with different credentials, SSL settings, or keystores
@@ -293,11 +309,39 @@ public class ElasticsearchIO {
         private RestClientBuilder createClientBuilder() throws IOException {
             HttpHost[] esHosts = new HttpHost[1];
             URL url = new URL(getAddress());
-            esHosts[0] = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+            esHosts[0] = new HttpHost(url.getHost(), url.getHost().equals("localhost") && url.getPort() == -1 ? 9200 : url.getPort(), url.getProtocol());
 
             RestClientBuilder restClientBuilder = RestClient.builder(esHosts);
 
-            if (null != getUsername() || null != getNumThread() || isIgnoreInsecureSSL()) {
+            // Pre-load keystore SSL context if configured (done outside callback to fail fast)
+            final SSLContext keystoreSslContext;
+            final SSLIOSessionStrategy keystoreSessionStrategy;
+            if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
+                try {
+                    KeyStore keyStore = KeyStore.getInstance("jks");
+                    try (InputStream is = new FileInputStream(new File(getKeystorePath()))) {
+                        String keystorePassword = getKeystorePassword();
+                        keyStore.load(is, (keystorePassword == null) ? null : keystorePassword.toCharArray());
+                    }
+                    final TrustStrategy trustStrategy =
+                        isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
+                    keystoreSslContext =
+                        SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
+                    keystoreSessionStrategy = new SSLIOSessionStrategy(keystoreSslContext);
+                } catch (Exception e) {
+                    throw new IOException("Can't load the client certificate from the keystore", e);
+                }
+            } else {
+                keystoreSslContext = null;
+                keystoreSessionStrategy = null;
+            }
+
+            // Single consolidated HttpClientConfigCallback — prevents the old bug where
+            // the keystore block silently overwrote credentials, thread config, and SSL settings
+            boolean needsCallback = null != getUsername() || null != getNumThread()
+                || isIgnoreInsecureSSL() || keystoreSslContext != null;
+
+            if (needsCallback) {
                 final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
                 if (null != getUsername())
                     credentialsProvider.setCredentials(
@@ -321,7 +365,11 @@ public class ElasticsearchIO {
                                             .build());
                                 }
 
-                                if (isIgnoreInsecureSSL()) {
+                                // Keystore-based SSL (takes priority over insecure SSL)
+                                if (keystoreSslContext != null) {
+                                    httpAsyncClientBuilder.setSSLContext(keystoreSslContext)
+                                        .setSSLStrategy(keystoreSessionStrategy);
+                                } else if (isIgnoreInsecureSSL()) {
                                     // SECURITY WARNING: This disables ALL TLS certificate verification.
                                     // An attacker in network position can intercept all traffic including
                                     // credentials and documents (MITM attack).
@@ -369,26 +417,6 @@ public class ElasticsearchIO {
                 new Header[] {new BasicHeader("Authorization", "ApiKey " + getApiKey())});
             }
 
-            if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
-                try {
-                    KeyStore keyStore = KeyStore.getInstance("jks");
-                    try (InputStream is = new FileInputStream(new File(getKeystorePath()))) {
-                        String keystorePassword = getKeystorePassword();
-                        keyStore.load(is, (keystorePassword == null) ? null : keystorePassword.toCharArray());
-                    }
-                    final TrustStrategy trustStrategy =
-                        isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
-                    final SSLContext sslContext =
-                        SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
-                    final SSLIOSessionStrategy sessionStrategy = new SSLIOSessionStrategy(sslContext);
-                    restClientBuilder.setHttpClientConfigCallback(
-                        httpClientBuilder ->
-                            httpClientBuilder.setSSLContext(sslContext).setSSLStrategy(sessionStrategy));
-                } catch (Exception e) {
-                    throw new IOException("Can't load the client certificate from the keystore", e);
-                }
-            }
-
             restClientBuilder.setRequestConfigCallback(
                 new RestClientBuilder.RequestConfigCallback() {
                     @Override
@@ -409,36 +437,47 @@ public class ElasticsearchIO {
             return restClientBuilder;
         }
 
-        // Atomic client pool management — eliminates race condition
+        // Double-check pattern: avoids holding ConcurrentHashMap bucket lock during
+        // network IO (DNS, TCP handshake, TLS negotiation). The tradeoff is occasional
+        // redundant client creation under race, which is far cheaper than blocking threads.
         private RestClient createClient() throws IOException {
             String poolKey = getPoolKey();
 
-            return clientPool.compute(poolKey, (k, existingClient) -> {
-                // Return existing client if still running
-                if (existingClient != null && existingClient.isRunning()) {
-                    return existingClient;
-                }
+            // Fast path: return existing running client without any locking
+            RestClient existing = clientPool.get(poolKey);
+            if (existing != null && existing.isRunning()) {
+                return existing;
+            }
 
-                // Close stale client if present
-                if (existingClient != null) {
-                    logger.warn("Closing stale RestClient for pool key: {}", k);
+            // Slow path: build new client OUTSIDE the lock (expensive network operation)
+            RestClient newClient = createClientBuilder().build();
+
+            // Atomic merge: handle race where another thread may have inserted first
+            RestClient winner = clientPool.merge(poolKey, newClient, (oldClient, createdClient) -> {
+                if (oldClient != null && oldClient.isRunning()) {
+                    // Another thread beat us — close the one we just created
                     try {
-                        existingClient.close();
+                        createdClient.close();
+                    } catch (IOException e) {
+                        logger.warn("Error closing redundant RestClient", e);
+                    }
+                    return oldClient;
+                }
+                // Old client is stale — close it
+                if (oldClient != null) {
+                    try {
+                        oldClient.close();
                     } catch (IOException e) {
                         logger.warn("Error closing stale RestClient", e);
                     }
                 }
-
-                // Create new client
-                try {
-                    RestClient client = createClientBuilder().build();
-                    logger.info("Created new RestClient for pool key: {}", k);
-                    return client;
-                } catch (IOException e) {
-                    logger.error("Failed to create RestClient for pool key: {}", k, e);
-                    throw new RuntimeException("Failed to create RestClient", e);
-                }
+                return createdClient;
             });
+
+            if (winner == newClient) {
+                logger.info("Created new RestClient for pool key: {}", poolKey);
+            }
+            return winner;
         }
 
         // Get cached client from pool with validation
@@ -496,19 +535,24 @@ public class ElasticsearchIO {
 
     static class DefaultRetryPredicate implements RetryPredicate {
 
-        private int errorCode;
+        // Retryable HTTP status codes: throttling + transient server errors
+        private static final Set<Integer> DEFAULT_RETRYABLE_CODES =
+            new HashSet<>(Arrays.asList(429, 500, 502, 503, 504));
+
+        private final Set<Integer> retryableCodes;
 
         DefaultRetryPredicate(int code) {
-            this.errorCode = code;
+            this.retryableCodes = new HashSet<>(Arrays.asList(code));
         }
 
-        // TOO_MANY_REQUESTS(429)
+        // Default: retry on TOO_MANY_REQUESTS(429), Internal Server Error(500),
+        // Bad Gateway(502), Service Unavailable(503), Gateway Timeout(504)
         DefaultRetryPredicate() {
-            this(429);
+            this.retryableCodes = DEFAULT_RETRYABLE_CODES;
         }
 
-        /** Returns true if the response has the error code for any mutation. */
-        private static boolean errorCodePresent(HttpEntity responseEntity, int errorCode) {
+        /** Returns true if the response has any retryable error code for any mutation. */
+        private static boolean retryableErrorPresent(HttpEntity responseEntity, Set<Integer> retryableCodes) {
             if (responseEntity == null) {
                 logger.warn("Response entity is null, cannot check for error codes");
                 return false;
@@ -517,7 +561,8 @@ public class ElasticsearchIO {
                 JsonNode json = parseResponse(responseEntity);
                 if (json.path("errors").asBoolean()) {
                     for (JsonNode item : json.path("items")) {
-                        if (item.findValue("status").asInt() == errorCode) {
+                        JsonNode statusNode = item.findValue("status");
+                        if (statusNode != null && retryableCodes.contains(statusNode.asInt())) {
                             return true;
                         }
                     }
@@ -530,7 +575,7 @@ public class ElasticsearchIO {
 
         @Override
         public boolean test(HttpEntity responseEntity) {
-            return errorCodePresent(responseEntity, errorCode);
+            return retryableErrorPresent(responseEntity, retryableCodes);
         }
     }
 
@@ -630,7 +675,7 @@ public class ElasticsearchIO {
 
             // transient lock — ReentrantLock is not Serializable
             private transient Object batchLock;
-            private transient List<String> batch;
+            private transient List<byte[]> batch;  // Store pre-encoded UTF-8 bytes to avoid double encoding
             private transient AtomicLong currentBatchSizeBytes;
             private volatile long lastFlushTime;
 
@@ -728,7 +773,7 @@ public class ElasticsearchIO {
             public void startBundle(StartBundleContext context) {
                 // Pre-allocate with estimated capacity for better performance
                 int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
-                batch = new ArrayList<>(estimatedCapacity);
+                batch = new ArrayList<byte[]>(estimatedCapacity);
                 currentBatchSizeBytes = new AtomicLong(0);
                 lastFlushTime = System.currentTimeMillis();
 
@@ -757,13 +802,22 @@ public class ElasticsearchIO {
             public void processElement(ProcessContext context) throws Exception {
                 String doc = context.element();
 
-                // Use actual UTF-8 byte length instead of 3x overestimate
+                // Encode to UTF-8 once — stored as byte[] in the batch to avoid
+                // double encoding (was: encode here for size, encode again in buildBulkRequest)
                 byte[] docUtf8 = doc.getBytes(StandardCharsets.UTF_8);
-                long docBytes = docUtf8.length;
+
+                // Guard against oversized documents that could cause OOM via memory amplification
+                // (byte[] in batch + bulk request buffer + optional gzip = up to 4x amplification)
+                if (docUtf8.length > spec.getMaxBatchSizeBytes()) {
+                    totalErrors.incrementAndGet();
+                    logger.error("Document exceeds max batch size ({} bytes > {} bytes limit). Skipping.",
+                        docUtf8.length, spec.getMaxBatchSizeBytes());
+                    return;
+                }
 
                 synchronized (batchLock) {
-                    batch.add(doc);
-                    currentBatchSizeBytes.addAndGet(docBytes);
+                    batch.add(docUtf8);
+                    currentBatchSizeBytes.addAndGet(docUtf8.length);
 
                     // Check flush conditions
                     if (shouldFlush()) {
@@ -860,7 +914,7 @@ public class ElasticsearchIO {
             }
 
             private void flushBatchAsync() {
-                List<String> currentBatch;
+                List<byte[]> currentBatch;
                 long batchBytes;
 
                 synchronized (batchLock) {
@@ -868,12 +922,13 @@ public class ElasticsearchIO {
                         return;
                     }
 
-                    // Swap batch for processing
-                    currentBatch = new ArrayList<>(batch);
+                    // Swap batch reference (O(1)) instead of copying (O(n))
+                    currentBatch = batch;
                     batchBytes = currentBatchSizeBytes.get();
 
-                    // Reset for next batch
-                    batch.clear();
+                    // Allocate fresh batch for next accumulation
+                    int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
+                    batch = new ArrayList<byte[]>(estimatedCapacity);
                     currentBatchSizeBytes.set(0);
                     lastFlushTime = System.currentTimeMillis();
                 }
@@ -903,7 +958,7 @@ public class ElasticsearchIO {
                 pendingOperations.add(future);
             }
 
-            private void processBatch(List<String> batchToProcess, long batchSizeBytes)
+            private void processBatch(List<byte[]> batchToProcess, long batchSizeBytes)
                     throws IOException, InterruptedException {
                 if (batchToProcess.isEmpty()) {
                     return;
@@ -912,7 +967,7 @@ public class ElasticsearchIO {
                 ByteArrayOutputStream baos = byteBufferPool.get();
                 baos.reset();
 
-                // Build bulk request efficiently
+                // Build bulk request — docs are already UTF-8 encoded byte arrays
                 buildBulkRequest(batchToProcess, baos);
 
                 byte[] requestBody = baos.toByteArray();
@@ -933,11 +988,11 @@ public class ElasticsearchIO {
                 }
             }
 
-            //  Use static final byte arrays instead of re-creating per batch
-            private void buildBulkRequest(List<String> docs, java.io.OutputStream out) throws IOException {
-                for (String doc : docs) {
+            // Docs are pre-encoded byte[] — no per-doc String.getBytes() allocation here
+            private void buildBulkRequest(List<byte[]> docs, java.io.OutputStream out) throws IOException {
+                for (byte[] doc : docs) {
                     out.write(INDEX_ACTION_BYTES);
-                    out.write(doc.getBytes(StandardCharsets.UTF_8));
+                    out.write(doc);
                     out.write(NEWLINE_BYTES);
                 }
             }
@@ -952,6 +1007,7 @@ public class ElasticsearchIO {
 
                 while (true) {
                     HttpEntity responseEntity = null;
+                    HttpEntity rawResponseEntity = null;
                     try {
                         // Validate client state before making request
                         if (!restClient.isRunning()) {
@@ -969,7 +1025,12 @@ public class ElasticsearchIO {
                         }
 
                         Response response = restClient.performRequest(request);
-                        responseEntity = response.getEntity();
+                        rawResponseEntity = response.getEntity();
+
+                        // Buffer response immediately so the HTTP connection is freed,
+                        // and the entity can be safely read multiple times (retry predicate + checkForErrors)
+                        byte[] responseBytes = EntityUtils.toByteArray(rawResponseEntity);
+                        responseEntity = new ByteArrayEntity(responseBytes, ContentType.APPLICATION_JSON);
 
                         // Check for errors in response
                         checkForErrors(responseEntity, esVersion, false);
@@ -1002,7 +1063,7 @@ public class ElasticsearchIO {
                         }
 
                         int maxAttempts = spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1;
-                        if (attempt > maxAttempts) {
+                        if (attempt >= maxAttempts) {
                             logger.error(RETRY_FAILED_LOG, attempt);
                             throw new IOException("Failed to write batch after " + attempt + " attempts", e);
                         }
@@ -1028,6 +1089,12 @@ public class ElasticsearchIO {
                             Sleeper.DEFAULT.sleep(backoffMillis);
                         } else {
                             throw new IOException("Non-retryable error", e);
+                        }
+                    } finally {
+                        // Ensure the raw HTTP response stream is fully consumed so the
+                        // connection can be returned to the pool (prevents connection starvation)
+                        if (rawResponseEntity != null) {
+                            EntityUtils.consumeQuietly(rawResponseEntity);
                         }
                     }
                 }
