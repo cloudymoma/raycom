@@ -739,4 +739,129 @@ public class ElasticsearchIOTest {
         assertEquals("admin", conf.getUsername());
         assertEquals(Integer.valueOf(4), conf.getNumThread());
     }
+
+    // =========================================================================
+    // Phase 3 Tests
+    // =========================================================================
+
+    // ---- Task 3.4: ExposedByteArrayOutputStream ----
+
+    @Test
+    public void exposedBaos_getRawBuffer_returnsInternalBuffer() throws Exception {
+        ElasticsearchIO.ExposedByteArrayOutputStream baos =
+            new ElasticsearchIO.ExposedByteArrayOutputStream(16);
+        byte[] data = "hello world".getBytes(StandardCharsets.UTF_8);
+        baos.write(data);
+
+        byte[] raw = baos.getRawBuffer();
+        // Raw buffer should contain the written data at the beginning
+        for (int i = 0; i < data.length; i++) {
+            assertEquals("Byte at position " + i + " should match", data[i], raw[i]);
+        }
+        assertEquals("size() should match data length", data.length, baos.size());
+        // Raw buffer may be larger than data (internal capacity)
+        assertTrue("Raw buffer should be at least as large as data",
+            raw.length >= data.length);
+    }
+
+    @Test
+    public void exposedBaos_avoidsCopy() throws Exception {
+        ElasticsearchIO.ExposedByteArrayOutputStream baos =
+            new ElasticsearchIO.ExposedByteArrayOutputStream(8192);
+        baos.write("test".getBytes(StandardCharsets.UTF_8));
+
+        // getRawBuffer returns the same array reference (no copy)
+        byte[] raw1 = baos.getRawBuffer();
+        byte[] raw2 = baos.getRawBuffer();
+        assertSame("getRawBuffer should return same reference", raw1, raw2);
+
+        // toByteArray returns a new copy each time
+        byte[] copy1 = baos.toByteArray();
+        byte[] copy2 = baos.toByteArray();
+        assertNotSame("toByteArray should return new copy", copy1, copy2);
+    }
+
+    // ---- Task 3.8: Configurable pending timeout ----
+
+    @Test
+    public void appendBuilder_defaultPendingTimeout() {
+        ElasticsearchIO.Append append = ElasticsearchIO.append();
+        assertEquals("Default pending timeout should be 60s",
+            60L, append.getPendingTimeoutSeconds());
+    }
+
+    @Test
+    public void appendBuilder_customPendingTimeout() {
+        ElasticsearchIO.Append append = ElasticsearchIO.append()
+            .withPendingTimeout(120);
+        assertEquals(120L, append.getPendingTimeoutSeconds());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void appendBuilder_rejectsZeroPendingTimeout() {
+        ElasticsearchIO.append().withPendingTimeout(0);
+    }
+
+    // ---- Task 3.10: LongAdder metrics ----
+
+    @Test
+    public void metrics_returnsExpectedKeys() {
+        java.util.Map<String, Long> metrics = ElasticsearchIO.getMetrics();
+        assertTrue("Metrics should contain totalDocuments", metrics.containsKey("totalDocuments"));
+        assertTrue("Metrics should contain totalBatches", metrics.containsKey("totalBatches"));
+        assertTrue("Metrics should contain totalErrors", metrics.containsKey("totalErrors"));
+        assertTrue("Metrics should contain activeConnections", metrics.containsKey("activeConnections"));
+        assertTrue("Metrics should contain avgBatchSize", metrics.containsKey("avgBatchSize"));
+    }
+
+    // =========================================================================
+    // Phase 4 Tests
+    // =========================================================================
+
+    // ---- Task 4.2: Typo fix — both old and new method names work ----
+
+    @Test
+    public void withIgnoreInsecureSSL_newMethodWorks() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withIgnoreInsecureSSL(true);
+        assertTrue(conf.isIgnoreInsecureSSL());
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    public void withIngnoreInsecureSSL_deprecatedMethodStillWorks() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withIngnoreInsecureSSL(true);
+        assertTrue("Deprecated method should still set the flag", conf.isIgnoreInsecureSSL());
+    }
+
+    // ---- Task 4.3: Pool key for logging redaction ----
+
+    @Test
+    public void poolKeyForLogging_redactsSensitiveInfo() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withUsername("admin")
+            .withPassword("secret");
+
+        String logKey = conf.getPoolKeyForLogging();
+        assertTrue("Log key should contain address", logKey.contains("es.example.com"));
+        assertTrue("Log key should contain index", logKey.contains("my-index"));
+        assertFalse("Log key should NOT contain username", logKey.contains("admin"));
+        assertFalse("Log key should NOT contain password", logKey.contains("secret"));
+        assertTrue("Log key should contain *** redaction", logKey.contains("***"));
+    }
+
+    @Test
+    public void poolKeyForLogging_differentFromPoolKey() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withUsername("admin");
+
+        // Pool key contains username, logging key does not
+        assertNotEquals("Log key should differ from pool key when username present",
+            conf.getPoolKey(), conf.getPoolKeyForLogging());
+    }
 }

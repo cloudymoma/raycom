@@ -72,6 +72,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.zip.GZIPOutputStream;
 import java.io.ByteArrayOutputStream;
 
@@ -133,6 +134,13 @@ public class ElasticsearchIO {
     private static final byte[] INDEX_ACTION_BYTES = "{\"index\":{}}\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NEWLINE_BYTES = "\n".getBytes(StandardCharsets.UTF_8);
 
+    /** Exposes the internal buffer to avoid the copy in {@link ByteArrayOutputStream#toByteArray()}. */
+    static class ExposedByteArrayOutputStream extends ByteArrayOutputStream {
+        ExposedByteArrayOutputStream(int size) { super(size); }
+        /** Returns the internal buffer — valid data is from index 0 to {@link #size()} - 1. */
+        byte[] getRawBuffer() { return buf; }
+    }
+
     // Connection pool for reusing clients across instances
     private static final ConcurrentHashMap<String, RestClient> clientPool = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Integer> versionCache = new ConcurrentHashMap<>();
@@ -140,10 +148,11 @@ public class ElasticsearchIO {
     // Note: scheduler is now instance-scoped in AppendFn (see @Setup/@Teardown)
     // to avoid cross-pipeline interference when multiple pipelines share the JVM.
 
-    // Performance metrics
-    private static final AtomicLong totalDocuments = new AtomicLong(0);
-    private static final AtomicLong totalBatches = new AtomicLong(0);
-    private static final AtomicLong totalErrors = new AtomicLong(0);
+    // Performance metrics — LongAdder avoids false sharing under high contention
+    // (adjacent AtomicLong fields would share CPU cache lines)
+    private static final LongAdder totalDocuments = new LongAdder();
+    private static final LongAdder totalBatches = new LongAdder();
+    private static final LongAdder totalErrors = new LongAdder();
 
     public static Append append() {
         return new AutoValue_ElasticsearchIO_Append.Builder()
@@ -152,6 +161,7 @@ public class ElasticsearchIO {
             .setFlushIntervalMillis(30000L) // 30 seconds default flush interval
             .setEnableCompression(false)
             .setMaxConcurrentRequests(5)
+            .setPendingTimeoutSeconds(60L)
             .build();
     }
 
@@ -220,6 +230,11 @@ public class ElasticsearchIO {
                .append(isTrustSelfSignedCerts()).append('|')
                .append(getKeystorePath() != null ? getKeystorePath() : "nokeys");
             return key.toString();
+        }
+
+        /** Returns a log-safe version of the pool key with username redacted. */
+        public String getPoolKeyForLogging() {
+            return getAddress() + "|" + getIndex() + "|***";
         }
 
         abstract Builder builder();
@@ -302,8 +317,14 @@ public class ElasticsearchIO {
             ).build();
         }
 
-        public ConnectionConf withIngnoreInsecureSSL(boolean ignoreInsecureSSL) {
+        public ConnectionConf withIgnoreInsecureSSL(boolean ignoreInsecureSSL) {
             return builder().setIgnoreInsecureSSL(ignoreInsecureSSL).build();
+        }
+
+        /** @deprecated Use {@link #withIgnoreInsecureSSL(boolean)} instead. */
+        @Deprecated
+        public ConnectionConf withIngnoreInsecureSSL(boolean ignoreInsecureSSL) {
+            return withIgnoreInsecureSSL(ignoreInsecureSSL);
         }
 
         private RestClientBuilder createClientBuilder() throws IOException {
@@ -422,12 +443,12 @@ public class ElasticsearchIO {
                     @Override
                     public RequestConfig.Builder customizeRequestConfig(
                             RequestConfig.Builder requestConfigBuilder) {
-                        if (null != getConnectTimeout()) {
-                            requestConfigBuilder.setConnectTimeout(getConnectTimeout());
-                        }
-                        if (null != getSocketTimeout()) {
-                            requestConfigBuilder.setSocketTimeout(getSocketTimeout());
-                        }
+                        // Default 30s connect timeout to prevent indefinite hangs against unresponsive nodes
+                        requestConfigBuilder.setConnectTimeout(
+                            getConnectTimeout() != null ? getConnectTimeout() : 30000);
+                        // Default 120s socket timeout for bulk operations
+                        requestConfigBuilder.setSocketTimeout(
+                            getSocketTimeout() != null ? getSocketTimeout() : 120000);
 
                         return requestConfigBuilder;
                     }
@@ -475,7 +496,7 @@ public class ElasticsearchIO {
             });
 
             if (winner == newClient) {
-                logger.info("Created new RestClient for pool key: {}", poolKey);
+                logger.info("Created new RestClient for pool key: {}", getPoolKeyForLogging());
             }
             return winner;
         }
@@ -598,6 +619,8 @@ public class ElasticsearchIO {
 
         abstract int getMaxConcurrentRequests();
 
+        abstract long getPendingTimeoutSeconds();
+
         abstract Builder builder();
 
         @AutoValue.Builder
@@ -615,6 +638,8 @@ public class ElasticsearchIO {
             abstract Builder setEnableCompression(boolean enableCompression);
 
             abstract Builder setMaxConcurrentRequests(int maxConcurrentRequests);
+
+            abstract Builder setPendingTimeoutSeconds(long pendingTimeoutSeconds);
 
             abstract Append build();
         }
@@ -654,6 +679,11 @@ public class ElasticsearchIO {
             return builder().setMaxConcurrentRequests(maxConcurrentRequests).build();
         }
 
+        public Append withPendingTimeout(long pendingTimeoutSeconds) {
+            checkArgument(pendingTimeoutSeconds > 0, "pendingTimeoutSeconds must be > 0, but was %s", pendingTimeoutSeconds);
+            return builder().setPendingTimeoutSeconds(pendingTimeoutSeconds).build();
+        }
+
         @Override
         public PDone expand(PCollection<String> input) {
             ConnectionConf connectionConf = getConnectionConf();
@@ -676,15 +706,16 @@ public class ElasticsearchIO {
             // transient lock — ReentrantLock is not Serializable
             private transient Object batchLock;
             private transient List<byte[]> batch;  // Store pre-encoded UTF-8 bytes to avoid double encoding
-            private transient AtomicLong currentBatchSizeBytes;
+            private transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
             private volatile long lastFlushTime;
 
             // Connection pooling and version caching
             private int esVersion;
             private transient String poolKey;
+            private transient String poolKeyForLog; // redacted version for logging
 
-            // Performance optimization: reuse byte buffers
-            private transient ThreadLocal<ByteArrayOutputStream> byteBufferPool;
+            // Performance optimization: reuse byte buffers (exposed subclass avoids toByteArray copy)
+            private transient ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool;
 
             // Instance-scoped scheduler for time-based flushing (not static — avoids cross-pipeline interference)
             private transient ScheduledExecutorService scheduler;
@@ -709,6 +740,7 @@ public class ElasticsearchIO {
             public void setup() throws IOException {
                 ConnectionConf connectionConf = spec.getConnectionConf();
                 poolKey = connectionConf.getPoolKey();
+                poolKeyForLog = connectionConf.getPoolKeyForLogging();
 
                 // Initialize lock after deserialization
                 batchLock = new Object();
@@ -717,7 +749,7 @@ public class ElasticsearchIO {
                 pendingOperations = new ConcurrentLinkedQueue<>();
 
                 // Initialize ThreadLocal after deserialization
-                byteBufferPool = ThreadLocal.withInitial(() -> new ByteArrayOutputStream(8192));
+                byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
 
                 // Instance-scoped scheduler — each DoFn instance gets its own, avoiding
                 // cross-pipeline interference when cleanup() is called
@@ -766,7 +798,7 @@ public class ElasticsearchIO {
                         .withMaxCumulativeBackoff(spec.getRetryConf().getMaxDuration());
                 }
 
-                logger.info("Setup completed for ES version {} with pool key: {}", esVersion, poolKey);
+                logger.info("Setup completed for ES version {} with pool key: {}", esVersion, poolKeyForLog);
             }
 
             @StartBundle
@@ -774,7 +806,7 @@ public class ElasticsearchIO {
                 // Pre-allocate with estimated capacity for better performance
                 int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
                 batch = new ArrayList<byte[]>(estimatedCapacity);
-                currentBatchSizeBytes = new AtomicLong(0);
+                currentBatchSizeBytes = 0;
                 lastFlushTime = System.currentTimeMillis();
 
                 // Schedule periodic flush and store the future for cancellation.
@@ -787,7 +819,7 @@ public class ElasticsearchIO {
                             try {
                                 timeBasedFlush();
                             } catch (Throwable t) {
-                                totalErrors.incrementAndGet();
+                                totalErrors.increment();
                                 logger.error("Scheduled flush task failed — flush will continue on next interval", t);
                             }
                         },
@@ -809,7 +841,7 @@ public class ElasticsearchIO {
                 // Guard against oversized documents that could cause OOM via memory amplification
                 // (byte[] in batch + bulk request buffer + optional gzip = up to 4x amplification)
                 if (docUtf8.length > spec.getMaxBatchSizeBytes()) {
-                    totalErrors.incrementAndGet();
+                    totalErrors.increment();
                     logger.error("Document exceeds max batch size ({} bytes > {} bytes limit). Skipping.",
                         docUtf8.length, spec.getMaxBatchSizeBytes());
                     return;
@@ -817,7 +849,7 @@ public class ElasticsearchIO {
 
                 synchronized (batchLock) {
                     batch.add(docUtf8);
-                    currentBatchSizeBytes.addAndGet(docUtf8.length);
+                    currentBatchSizeBytes += docUtf8.length;
 
                     // Check flush conditions
                     if (shouldFlush()) {
@@ -828,7 +860,7 @@ public class ElasticsearchIO {
 
             private boolean shouldFlush() {
                 return batch.size() >= spec.getMaxBatchSize() ||
-                       currentBatchSizeBytes.get() >= spec.getMaxBatchSizeBytes() ||
+                       currentBatchSizeBytes >= spec.getMaxBatchSizeBytes() ||
                        (spec.getFlushIntervalMillis() > 0 &&
                         System.currentTimeMillis() - lastFlushTime >= spec.getFlushIntervalMillis());
             }
@@ -854,16 +886,17 @@ public class ElasticsearchIO {
                     return;
                 }
 
+                long timeoutSecs = spec.getPendingTimeoutSeconds();
                 try {
-                    CompletableFuture.allOf(futures).get(60, TimeUnit.SECONDS);
+                    CompletableFuture.allOf(futures).get(timeoutSecs, TimeUnit.SECONDS);
                     logger.debug("All {} pending operations completed successfully", futures.length);
                 } catch (TimeoutException e) {
-                    totalErrors.incrementAndGet();
+                    totalErrors.increment();
                     throw new IOException(
-                        "Elasticsearch operations timed out after 60s — potential data loss for "
+                        "Elasticsearch operations timed out after " + timeoutSecs + "s — potential data loss for "
                         + futures.length + " pending batches", e);
                 } catch (ExecutionException e) {
-                    totalErrors.incrementAndGet();
+                    totalErrors.increment();
                     throw new IOException("Elasticsearch batch operation failed", e.getCause());
                 } finally {
                     pendingOperations.clear();
@@ -910,7 +943,7 @@ public class ElasticsearchIO {
                 if (pendingOperations != null) {
                     pendingOperations.clear();
                 }
-                logger.debug("Teardown completed for pool key: {}", poolKey);
+                logger.debug("Teardown completed for pool key: {}", poolKeyForLog);
             }
 
             private void flushBatchAsync() {
@@ -924,12 +957,12 @@ public class ElasticsearchIO {
 
                     // Swap batch reference (O(1)) instead of copying (O(n))
                     currentBatch = batch;
-                    batchBytes = currentBatchSizeBytes.get();
+                    batchBytes = currentBatchSizeBytes;
 
                     // Allocate fresh batch for next accumulation
                     int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
                     batch = new ArrayList<byte[]>(estimatedCapacity);
-                    currentBatchSizeBytes.set(0);
+                    currentBatchSizeBytes = 0;
                     lastFlushTime = System.currentTimeMillis();
                 }
 
@@ -948,7 +981,7 @@ public class ElasticsearchIO {
                         processBatch(currentBatch, batchBytes);
                     } catch (Exception e) {
                         logger.error("Failed to process batch of {} documents", currentBatch.size(), e);
-                        totalErrors.incrementAndGet();
+                        totalErrors.increment();
                         throw new RuntimeException("Batch processing failed", e);
                     } finally {
                         concurrencySemaphore.release();
@@ -964,26 +997,36 @@ public class ElasticsearchIO {
                     return;
                 }
 
-                ByteArrayOutputStream baos = byteBufferPool.get();
+                ExposedByteArrayOutputStream baos = byteBufferPool.get();
+                // Cap buffer growth: if previous batch grew the buffer > 1MB, replace it
+                // to prevent permanent memory retention at peak size
+                if (baos.size() > 1024 * 1024) {
+                    baos = new ExposedByteArrayOutputStream(8192);
+                    byteBufferPool.set(baos);
+                }
                 baos.reset();
 
                 // Build bulk request — docs are already UTF-8 encoded byte arrays
                 buildBulkRequest(batchToProcess, baos);
 
-                byte[] requestBody = baos.toByteArray();
+                int requestLen = baos.size();
 
                 // Apply compression if enabled and payload is large enough
-                if (spec.getEnableCompression() && requestBody.length > 102400) { // 100KB threshold
-                    ByteArrayOutputStream gzipBaos = new ByteArrayOutputStream(requestBody.length / 4);
+                if (spec.getEnableCompression() && requestLen > 102400) { // 100KB threshold
+                    ByteArrayOutputStream gzipBaos = new ByteArrayOutputStream(requestLen / 4);
                     try (GZIPOutputStream gzip = new GZIPOutputStream(gzipBaos)) {
-                        gzip.write(requestBody);
+                        // Write directly from raw buffer — avoids toByteArray() copy
+                        gzip.write(baos.getRawBuffer(), 0, requestLen);
                     }
                     byte[] compressed = gzipBaos.toByteArray();
                     logger.debug("Compressed batch from {} to {} bytes ({} ratio)",
-                        requestBody.length, compressed.length,
-                        String.format("%.1f%%", 100.0 * compressed.length / requestBody.length));
+                        requestLen, compressed.length,
+                        String.format("%.1f%%", 100.0 * compressed.length / requestLen));
                     executeWithRetry(compressed, batchToProcess.size(), batchSizeBytes, true);
                 } else {
+                    // Use ByteArrayEntity with offset/length from raw buffer — avoids toByteArray() copy
+                    byte[] requestBody = new byte[requestLen];
+                    System.arraycopy(baos.getRawBuffer(), 0, requestBody, 0, requestLen);
                     executeWithRetry(requestBody, batchToProcess.size(), batchSizeBytes, false);
                 }
             }
@@ -1036,8 +1079,8 @@ public class ElasticsearchIO {
                         checkForErrors(responseEntity, esVersion, false);
 
                         // Update metrics
-                        totalDocuments.addAndGet(docCount);
-                        totalBatches.incrementAndGet();
+                        totalDocuments.add(docCount);
+                        totalBatches.increment();
 
                         logger.debug("Successfully flushed batch of {} documents ({} bytes)",
                             docCount, batchSizeBytes);
@@ -1045,7 +1088,7 @@ public class ElasticsearchIO {
 
                     } catch (Exception e) {
                         attempt++;
-                        totalErrors.incrementAndGet();
+                        totalErrors.increment();
 
                         // Handle client state issues specifically
                         if (e instanceof IllegalStateException
@@ -1057,6 +1100,10 @@ public class ElasticsearchIO {
                                 clientPool.remove(currentPoolKey);
                                 restClient = spec.getConnectionConf().getPooledClient();
                                 logger.info("Successfully recreated RestClient after IllegalStateException");
+                                // Reset retry budget — the previous failures were due to client state,
+                                // not ES rejecting the data
+                                attempt = 0;
+                                backoff = retryBackoff.backoff();
                             } catch (Exception recreateEx) {
                                 logger.error("Failed to recreate RestClient", recreateEx);
                             }
@@ -1186,8 +1233,11 @@ public class ElasticsearchIO {
             Request request = new Request("GET", "");
             Response response = restClient.performRequest(request);
             JsonNode jsonNode = parseResponse(response.getEntity());
-            int esVersion =
-                Integer.parseInt(jsonNode.path("version").path("number").asText().substring(0, 1));
+            String versionStr = jsonNode.path("version").path("number").asText();
+            if (versionStr == null || versionStr.isEmpty()) {
+                throw new IOException("Could not determine Elasticsearch version — empty version string in response");
+            }
+            int esVersion = Integer.parseInt(versionStr.substring(0, 1));
             checkArgument(
                 VALID_CLUSTER_VERSIONS.contains(esVersion),
                 "The Elasticsearch version to connect to is %s.x. "
@@ -1238,7 +1288,7 @@ public class ElasticsearchIO {
         versionCache.clear();
 
         logger.info("ElasticsearchIO cleanup completed. Total documents: {}, batches: {}, errors: {}",
-            totalDocuments.get(), totalBatches.get(), totalErrors.get());
+            totalDocuments.sum(), totalBatches.sum(), totalErrors.sum());
     }
 
     /**
@@ -1246,12 +1296,12 @@ public class ElasticsearchIO {
      */
     public static Map<String, Long> getMetrics() {
         Map<String, Long> metrics = new HashMap<>();
-        metrics.put("totalDocuments", totalDocuments.get());
-        metrics.put("totalBatches", totalBatches.get());
-        metrics.put("totalErrors", totalErrors.get());
+        metrics.put("totalDocuments", totalDocuments.sum());
+        metrics.put("totalBatches", totalBatches.sum());
+        metrics.put("totalErrors", totalErrors.sum());
         metrics.put("activeConnections", (long) clientPool.size());
-        long batches = totalBatches.get();
-        metrics.put("avgBatchSize", batches > 0 ? totalDocuments.get() / batches : 0L);
+        long batches = totalBatches.sum();
+        metrics.put("avgBatchSize", batches > 0 ? totalDocuments.sum() / batches : 0L);
         return metrics;
     }
 
