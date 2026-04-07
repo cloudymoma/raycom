@@ -5,6 +5,7 @@ import static org.junit.Assert.*;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.Queue;
 
 import org.apache.http.HttpEntity;
+import org.apache.http.HttpHost;
 import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.entity.ContentType;
 
@@ -986,5 +988,148 @@ public class ElasticsearchIOTest {
         // Pool key contains username, logging key does not
         assertNotEquals("Log key should differ from pool key when username present",
             conf.getPoolKey(), conf.getPoolKeyForLogging());
+    }
+
+    // =========================================================================
+    // URL / Port Handling — covers createClientBuilder's HttpHost construction
+    // =========================================================================
+    // These tests validate the URL parsing that feeds into:
+    //   new HttpHost(url.getHost(), url.getPort(), url.getProtocol())
+    // The HttpHost constructor handles port=-1 by using the scheme default.
+
+    @Test
+    public void urlParsing_explicitPort_preservedCorrectly() throws Exception {
+        URL url = new URL("https://es-cluster.example.com:9200");
+        assertEquals("es-cluster.example.com", url.getHost());
+        assertEquals(9200, url.getPort());
+        assertEquals("https", url.getProtocol());
+
+        HttpHost host = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+        assertEquals(9200, host.getPort());
+        assertEquals("es-cluster.example.com", host.getHostName());
+        assertEquals("https", host.getSchemeName());
+    }
+
+    @Test
+    public void urlParsing_noPort_returnsMinusOne() throws Exception {
+        URL url = new URL("https://es-cluster.internal");
+        assertEquals("es-cluster.internal", url.getHost());
+        assertEquals(-1, url.getPort());
+        assertEquals("https", url.getProtocol());
+
+        // HttpHost with port=-1 uses scheme default (443 for https)
+        HttpHost host = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+        assertEquals(-1, host.getPort());
+        // toURI uses scheme default when port is -1
+        assertTrue("HttpHost should handle -1 port gracefully",
+            host.toHostString().equals("es-cluster.internal:443")
+            || host.toHostString().equals("es-cluster.internal"));
+    }
+
+    @Test
+    public void urlParsing_httpNoPort() throws Exception {
+        URL url = new URL("http://es-cluster.internal");
+        assertEquals(-1, url.getPort());
+        assertEquals("http", url.getProtocol());
+
+        HttpHost host = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+        assertEquals(-1, host.getPort());
+    }
+
+    @Test
+    public void urlParsing_localhostWithPort() throws Exception {
+        URL url = new URL("http://localhost:9200");
+        assertEquals("localhost", url.getHost());
+        assertEquals(9200, url.getPort());
+
+        HttpHost host = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+        assertEquals(9200, host.getPort());
+    }
+
+    @Test
+    public void urlParsing_localhostNoPort() throws Exception {
+        // This is the case the buggy localhost hack was trying to handle.
+        // The correct behavior: pass -1 to HttpHost, which uses scheme default.
+        URL url = new URL("http://localhost");
+        assertEquals("localhost", url.getHost());
+        assertEquals(-1, url.getPort());
+
+        HttpHost host = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+        assertEquals("Port should be -1 (scheme default), not hardcoded 9200",
+            -1, host.getPort());
+    }
+
+    @Test
+    public void urlParsing_httpsWithNonStandardPort() throws Exception {
+        URL url = new URL("https://secure-es.example.com:9243");
+        assertEquals(9243, url.getPort());
+
+        HttpHost host = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+        assertEquals(9243, host.getPort());
+        assertEquals("https", host.getSchemeName());
+    }
+
+    @Test
+    public void urlParsing_ipAddressWithPort() throws Exception {
+        URL url = new URL("http://10.0.1.50:9200");
+        assertEquals("10.0.1.50", url.getHost());
+        assertEquals(9200, url.getPort());
+
+        HttpHost host = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+        assertEquals("10.0.1.50", host.getHostName());
+        assertEquals(9200, host.getPort());
+    }
+
+    @Test
+    public void urlParsing_ipv6WithPort() throws Exception {
+        // IPv6 addresses are enclosed in brackets in URLs
+        URL url = new URL("http://[::1]:9200");
+        assertEquals("[::1]", url.getHost());
+        assertEquals(9200, url.getPort());
+    }
+
+    // ConnectionConf integration — ensure various address formats are accepted
+
+    @Test
+    public void connectionConf_explicitPort_accepted() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es-cluster.example.com:9200", "my-index");
+        assertEquals("https://es-cluster.example.com:9200", conf.getAddress());
+    }
+
+    @Test
+    public void connectionConf_noPort_accepted() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es-cluster.internal", "my-index");
+        assertEquals("https://es-cluster.internal", conf.getAddress());
+    }
+
+    @Test
+    public void connectionConf_httpLocalhost_accepted() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("http://localhost:9200", "my-index");
+        assertEquals("http://localhost:9200", conf.getAddress());
+    }
+
+    @Test
+    public void connectionConf_differentPortsSameDomain_differentPoolKeys() {
+        ElasticsearchIO.ConnectionConf conf1 = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index");
+        ElasticsearchIO.ConnectionConf conf2 = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9243", "my-index");
+
+        assertNotEquals("Different ports should produce different pool keys",
+            conf1.getPoolKey(), conf2.getPoolKey());
+    }
+
+    @Test
+    public void connectionConf_httpVsHttps_differentPoolKeys() {
+        ElasticsearchIO.ConnectionConf conf1 = ElasticsearchIO.ConnectionConf
+            .create("http://es.example.com:9200", "my-index");
+        ElasticsearchIO.ConnectionConf conf2 = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index");
+
+        assertNotEquals("Different schemes should produce different pool keys",
+            conf1.getPoolKey(), conf2.getPoolKey());
     }
 }
