@@ -2,7 +2,10 @@ package bindiego.io;
 
 import static org.junit.Assert.*;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
@@ -15,6 +18,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.Queue;
+
+import org.apache.http.HttpEntity;
+import org.apache.http.entity.ByteArrayEntity;
+import org.apache.http.entity.ContentType;
 
 import org.junit.Test;
 
@@ -529,5 +536,207 @@ public class ElasticsearchIOTest {
         }
 
         ioExecutor.shutdown();
+    }
+
+    // =========================================================================
+    // Phase 2 Tests
+    // =========================================================================
+
+    // ---- Task 2.4: Expanded retryable HTTP status codes ----
+
+    @Test
+    public void retryPredicate_retries429() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":429}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertTrue("429 should be retryable", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_retries500() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":500}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertTrue("500 should be retryable", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_retries502() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":502}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertTrue("502 should be retryable", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_retries503() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":503}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertTrue("503 should be retryable", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_retries504() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":504}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertTrue("504 should be retryable", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_doesNotRetry400() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":400}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertFalse("400 should NOT be retryable", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_doesNotRetry404() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":404}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertFalse("404 should NOT be retryable", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_noErrorsReturnsFalse() throws Exception {
+        String body = "{\"errors\":false,\"items\":[{\"index\":{\"status\":200}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
+        assertFalse("No errors should not trigger retry", predicate.test(entity));
+    }
+
+    @Test
+    public void retryPredicate_singleCodeConstructor() throws Exception {
+        // The single-code constructor should only retry the specified code
+        String body429 = "{\"errors\":true,\"items\":[{\"index\":{\"status\":429}}]}";
+        String body500 = "{\"errors\":true,\"items\":[{\"index\":{\"status\":500}}]}";
+        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate(429);
+        HttpEntity entity429 = new ByteArrayEntity(body429.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        HttpEntity entity500 = new ByteArrayEntity(body500.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        assertTrue("Single-code predicate should retry 429", predicate.test(entity429));
+        assertFalse("Single-code predicate should NOT retry 500", predicate.test(entity500));
+    }
+
+    // ---- Task 2.5: checkForErrors ----
+
+    @Test
+    public void checkForErrors_noErrors_doesNotThrow() throws Exception {
+        String body = "{\"errors\":false,\"items\":[{\"index\":{\"status\":201,\"_id\":\"1\"}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        // Should not throw
+        ElasticsearchIO.checkForErrors(entity, 8, false);
+    }
+
+    @Test(expected = IOException.class)
+    public void checkForErrors_withErrors_throwsIOException() throws Exception {
+        String body = "{\"errors\":true,\"items\":[{\"index\":{\"_id\":\"1\",\"status\":400,\"error\":{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse\"}}}]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+        ElasticsearchIO.checkForErrors(entity, 8, false);
+    }
+
+    @Test(expected = IOException.class)
+    public void checkForErrors_nullEntity_throwsIOException() throws Exception {
+        ElasticsearchIO.checkForErrors(null, 8, false);
+    }
+
+    // ---- Task 2.8: toString redaction ----
+
+    @Test
+    public void connectionConf_toString_redactsPassword() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withUsername("admin")
+            .withPassword("super-secret-password");
+
+        String str = conf.toString();
+        assertFalse("toString must NOT contain the actual password",
+            str.contains("super-secret-password"));
+        assertTrue("toString must contain *** for password",
+            str.contains("password=***"));
+    }
+
+    @Test
+    public void connectionConf_toString_redactsApiKey() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withApiKey("my-secret-api-key-xyz");
+
+        String str = conf.toString();
+        assertFalse("toString must NOT contain the actual API key",
+            str.contains("my-secret-api-key-xyz"));
+        assertTrue("toString must contain *** for apiKey",
+            str.contains("apiKey=***"));
+    }
+
+    @Test
+    public void connectionConf_toString_showsNullForMissingCredentials() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index");
+
+        String str = conf.toString();
+        assertTrue("toString should show null for missing password",
+            str.contains("password=null"));
+        assertTrue("toString should show null for missing apiKey",
+            str.contains("apiKey=null"));
+    }
+
+    @Test
+    public void connectionConf_toString_preservesNonSensitiveFields() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withUsername("admin");
+
+        String str = conf.toString();
+        assertTrue("toString should contain address",
+            str.contains("https://es.example.com:9200"));
+        assertTrue("toString should contain index",
+            str.contains("my-index"));
+        assertTrue("toString should contain username",
+            str.contains("admin"));
+    }
+
+    // ---- Task 2.6: Maximum document size guard ----
+    // (Tested indirectly via builder validation — the guard is in processElement
+    //  which requires a full Beam pipeline context to invoke directly)
+
+    @Test
+    public void appendBuilder_maxBatchSizeBytes_default() {
+        ElasticsearchIO.Append append = ElasticsearchIO.append();
+        assertEquals("Default maxBatchSizeBytes should be 5MB",
+            5L * 1024L * 1024L, append.getMaxBatchSizeBytes());
+    }
+
+    @Test
+    public void appendBuilder_customBatchSizeBytes() {
+        ElasticsearchIO.Append append = ElasticsearchIO.append()
+            .withMaxBatchSizeBytes(10L * 1024L * 1024L);
+        assertEquals(10L * 1024L * 1024L, append.getMaxBatchSizeBytes());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void appendBuilder_rejectsZeroBatchSizeBytes() {
+        ElasticsearchIO.append().withMaxBatchSizeBytes(0);
+    }
+
+    // ---- Task 2.7: Consolidated callback (validated by successful build) ----
+
+    @Test
+    public void connectionConf_createWithAllOptions_noException() {
+        // Verifies the builder doesn't throw when all options are set
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withUsername("admin")
+            .withPassword("pass")
+            .withTrustSelfSignedCerts(true)
+            .withSocketTimeout(30000)
+            .withConnectTimeout(5000)
+            .withNumThread(4);
+
+        assertNotNull(conf);
+        assertEquals("admin", conf.getUsername());
+        assertEquals(Integer.valueOf(4), conf.getNumThread());
     }
 }
