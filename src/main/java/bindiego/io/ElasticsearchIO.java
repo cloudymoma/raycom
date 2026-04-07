@@ -330,7 +330,7 @@ public class ElasticsearchIO {
         private RestClientBuilder createClientBuilder() throws IOException {
             HttpHost[] esHosts = new HttpHost[1];
             URL url = new URL(getAddress());
-            esHosts[0] = new HttpHost(url.getHost(), url.getHost().equals("localhost") && url.getPort() == -1 ? 9200 : url.getPort(), url.getProtocol());
+            esHosts[0] = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
 
             RestClientBuilder restClientBuilder = RestClient.builder(esHosts);
 
