@@ -854,6 +854,129 @@ public class ElasticsearchIOTest {
         assertTrue("Log key should contain *** redaction", logKey.contains("***"));
     }
 
+    // =========================================================================
+    // Task 3.7: parseBulkResponse — partial bulk failure handling
+    // =========================================================================
+
+    @Test
+    public void parseBulkResponse_allSuccess() throws Exception {
+        String body = "{\"took\":5,\"errors\":false,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":201}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":201}},"
+            + "{\"index\":{\"_id\":\"3\",\"status\":201}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        assertEquals("All 3 docs should succeed", 3, result.successCount);
+        assertTrue("No retryable failures", result.retryableFailures.isEmpty());
+        assertTrue("No non-retryable failures", result.nonRetryableFailures.isEmpty());
+        assertFalse("hasFailures should be false", result.hasFailures());
+    }
+
+    @Test
+    public void parseBulkResponse_mixedRetryableAndNonRetryable() throws Exception {
+        String body = "{\"took\":10,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":201}},"                                    // success
+            + "{\"index\":{\"_id\":\"2\",\"status\":429,\"error\":{\"type\":\"es_rejected_execution_exception\",\"reason\":\"too many requests\"}}},"  // retryable
+            + "{\"index\":{\"_id\":\"3\",\"status\":201}},"                                    // success
+            + "{\"index\":{\"_id\":\"4\",\"status\":400,\"error\":{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse\"}}},"           // non-retryable
+            + "{\"index\":{\"_id\":\"5\",\"status\":201}}"                                     // success
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        assertEquals("3 docs should succeed", 3, result.successCount);
+        assertEquals("1 retryable failure", 1, result.retryableFailures.size());
+        assertEquals("1 non-retryable failure", 1, result.nonRetryableFailures.size());
+        assertTrue("hasFailures should be true", result.hasFailures());
+    }
+
+    @Test
+    public void parseBulkResponse_preservesPositionalIndex() throws Exception {
+        String body = "{\"took\":10,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":201}},"                                    // index 0: success
+            + "{\"index\":{\"_id\":\"2\",\"status\":201}},"                                    // index 1: success
+            + "{\"index\":{\"_id\":\"3\",\"status\":429,\"error\":{\"type\":\"throttle\",\"reason\":\"busy\"}}},"  // index 2: retryable
+            + "{\"index\":{\"_id\":\"4\",\"status\":201}},"                                    // index 3: success
+            + "{\"index\":{\"_id\":\"5\",\"status\":400,\"error\":{\"type\":\"mapping\",\"reason\":\"bad field\"}}}"  // index 4: non-retryable
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        // Verify positional indices are correct
+        assertEquals("Retryable failure should be at index 2", 2, result.retryableFailures.get(0).index);
+        assertEquals("Retryable status should be 429", 429, result.retryableFailures.get(0).statusCode);
+        assertEquals("Non-retryable failure should be at index 4", 4, result.nonRetryableFailures.get(0).index);
+        assertEquals("Non-retryable status should be 400", 400, result.nonRetryableFailures.get(0).statusCode);
+    }
+
+    @Test
+    public void parseBulkResponse_allRetryable() throws Exception {
+        String body = "{\"took\":10,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":429,\"error\":{\"type\":\"throttle\",\"reason\":\"busy\"}}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":503,\"error\":{\"type\":\"unavailable\",\"reason\":\"shard unavailable\"}}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        assertEquals("0 successes", 0, result.successCount);
+        assertEquals("2 retryable failures", 2, result.retryableFailures.size());
+        assertTrue("No non-retryable failures", result.nonRetryableFailures.isEmpty());
+    }
+
+    @Test
+    public void parseBulkResponse_allNonRetryable() throws Exception {
+        String body = "{\"took\":10,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":400,\"error\":{\"type\":\"mapping\",\"reason\":\"bad\"}}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":409,\"error\":{\"type\":\"conflict\",\"reason\":\"version\"}}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        assertEquals("0 successes", 0, result.successCount);
+        assertTrue("No retryable failures", result.retryableFailures.isEmpty());
+        assertEquals("2 non-retryable failures", 2, result.nonRetryableFailures.size());
+    }
+
+    @Test
+    public void parseBulkResponse_capturesErrorDetails() throws Exception {
+        String body = "{\"took\":10,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":400,\"error\":{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [age] of type [long]\"}}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        ElasticsearchIO.BulkResult.FailedDoc doc = result.nonRetryableFailures.get(0);
+        assertEquals(0, doc.index);
+        assertEquals(400, doc.statusCode);
+        assertEquals("mapper_parsing_exception", doc.errorType);
+        assertTrue("Reason should contain field info",
+            doc.errorReason.contains("failed to parse field"));
+    }
+
+    @Test
+    public void parseBulkResponse_retryable500Series() throws Exception {
+        // Verify all retryable server errors are classified correctly
+        for (int code : new int[]{500, 502, 503, 504}) {
+            String body = "{\"took\":1,\"errors\":true,\"items\":["
+                + "{\"index\":{\"_id\":\"1\",\"status\":" + code
+                + ",\"error\":{\"type\":\"server_error\",\"reason\":\"test\"}}}"
+                + "]}";
+            HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+            ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+            assertEquals("HTTP " + code + " should be retryable", 1, result.retryableFailures.size());
+            assertEquals(code, result.retryableFailures.get(0).statusCode);
+        }
+    }
+
     @Test
     public void poolKeyForLogging_differentFromPoolKey() {
         ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf

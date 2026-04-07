@@ -600,6 +600,41 @@ public class ElasticsearchIO {
         }
     }
 
+    /**
+     * Structured result of a bulk API call. Separates per-item successes from failures,
+     * and classifies failures as retryable vs non-retryable for targeted retry.
+     */
+    static class BulkResult {
+        final int successCount;
+        final List<FailedDoc> retryableFailures;
+        final List<FailedDoc> nonRetryableFailures;
+
+        BulkResult(int successCount, List<FailedDoc> retryableFailures,
+                   List<FailedDoc> nonRetryableFailures) {
+            this.successCount = successCount;
+            this.retryableFailures = retryableFailures;
+            this.nonRetryableFailures = nonRetryableFailures;
+        }
+
+        boolean hasFailures() {
+            return !retryableFailures.isEmpty() || !nonRetryableFailures.isEmpty();
+        }
+
+        static class FailedDoc {
+            final int index;         // positional index in the original List<byte[]>
+            final int statusCode;
+            final String errorType;
+            final String errorReason;
+
+            FailedDoc(int index, int statusCode, String errorType, String errorReason) {
+                this.index = index;
+                this.statusCode = statusCode;
+                this.errorType = errorType;
+                this.errorReason = errorReason;
+            }
+        }
+    }
+
     @AutoValue
     public abstract static class Append extends PTransform<PCollection<String>, PDone> {
 
@@ -996,38 +1031,94 @@ public class ElasticsearchIO {
                 if (batchToProcess.isEmpty()) {
                     return;
                 }
+                int maxRetries = spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1;
+                totalBatches.increment();
+                processBatchWithRetry(batchToProcess, batchSizeBytes, maxRetries);
+            }
 
+            /**
+             * Sends docs to ES. On partial failure, extracts only the failed documents
+             * and retries them in a smaller batch. Non-retryable failures (400, 409) are
+             * logged and dropped — retrying them would fail again AND cause duplicate
+             * indexing of the docs that already succeeded.
+             */
+            private void processBatchWithRetry(List<byte[]> docs, long sizeBytes, int retriesLeft)
+                    throws IOException, InterruptedException {
+                // Build bulk request
                 ExposedByteArrayOutputStream baos = byteBufferPool.get();
-                // Cap buffer growth: if previous batch grew the buffer > 1MB, replace it
-                // to prevent permanent memory retention at peak size
                 if (baos.size() > 1024 * 1024) {
                     baos = new ExposedByteArrayOutputStream(8192);
                     byteBufferPool.set(baos);
                 }
                 baos.reset();
-
-                // Build bulk request — docs are already UTF-8 encoded byte arrays
-                buildBulkRequest(batchToProcess, baos);
-
+                buildBulkRequest(docs, baos);
                 int requestLen = baos.size();
 
-                // Apply compression if enabled and payload is large enough
-                if (spec.getEnableCompression() && requestLen > 102400) { // 100KB threshold
+                // Compress if needed
+                byte[] requestBody;
+                boolean compressed;
+                if (spec.getEnableCompression() && requestLen > 102400) {
                     ByteArrayOutputStream gzipBaos = new ByteArrayOutputStream(requestLen / 4);
                     try (GZIPOutputStream gzip = new GZIPOutputStream(gzipBaos)) {
-                        // Write directly from raw buffer — avoids toByteArray() copy
                         gzip.write(baos.getRawBuffer(), 0, requestLen);
                     }
-                    byte[] compressed = gzipBaos.toByteArray();
+                    requestBody = gzipBaos.toByteArray();
+                    compressed = true;
                     logger.debug("Compressed batch from {} to {} bytes ({} ratio)",
-                        requestLen, compressed.length,
-                        String.format("%.1f%%", 100.0 * compressed.length / requestLen));
-                    executeWithRetry(compressed, batchToProcess.size(), batchSizeBytes, true);
+                        requestLen, requestBody.length,
+                        String.format("%.1f%%", 100.0 * requestBody.length / requestLen));
                 } else {
-                    // Use ByteArrayEntity with offset/length from raw buffer — avoids toByteArray() copy
-                    byte[] requestBody = new byte[requestLen];
+                    requestBody = new byte[requestLen];
                     System.arraycopy(baos.getRawBuffer(), 0, requestBody, 0, requestLen);
-                    executeWithRetry(requestBody, batchToProcess.size(), batchSizeBytes, false);
+                    compressed = false;
+                }
+
+                // Send to ES — returns structured result, does NOT throw on per-item errors
+                BulkResult result = executeWithRetry(requestBody, docs.size(), sizeBytes, compressed);
+
+                // Account for successes
+                totalDocuments.add(result.successCount);
+
+                // Handle non-retryable failures: log and drop
+                for (BulkResult.FailedDoc f : result.nonRetryableFailures) {
+                    logger.error("Non-retryable error on doc index {}: status={}, type={}, reason={}",
+                        f.index, f.statusCode, f.errorType, f.errorReason);
+                    totalErrors.increment();
+                }
+
+                // Handle retryable failures: extract failed docs and retry
+                if (!result.retryableFailures.isEmpty()) {
+                    if (retriesLeft > 0) {
+                        List<byte[]> retryDocs = new ArrayList<>(result.retryableFailures.size());
+                        long retryBytes = 0;
+                        for (BulkResult.FailedDoc f : result.retryableFailures) {
+                            byte[] doc = docs.get(f.index);
+                            retryDocs.add(doc);
+                            retryBytes += doc.length;
+                        }
+                        logger.warn("Retrying {} failed docs (out of {}), {} retries remaining",
+                            retryDocs.size(), docs.size(), retriesLeft - 1);
+
+                        // Backoff before retry
+                        try {
+                            Sleeper.DEFAULT.sleep(
+                                Duration.standardSeconds(5).getMillis());
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw e;
+                        }
+
+                        processBatchWithRetry(retryDocs, retryBytes, retriesLeft - 1);
+                    } else {
+                        // Exhausted retries — log all remaining failures
+                        for (BulkResult.FailedDoc f : result.retryableFailures) {
+                            logger.error("Retryable error exhausted retries, doc index {}: status={}, type={}, reason={}",
+                                f.index, f.statusCode, f.errorType, f.errorReason);
+                        }
+                        totalErrors.add(result.retryableFailures.size());
+                        throw new IOException("Failed to index " + result.retryableFailures.size() +
+                            " documents after exhausting retries");
+                    }
                 }
             }
 
@@ -1040,16 +1131,23 @@ public class ElasticsearchIO {
                 }
             }
 
-            private void executeWithRetry(byte[] requestBody, int docCount, long batchSizeBytes,
-                    boolean compressed)
+            /**
+             * Sends the bulk request to ES with HTTP-level retry (connection failures,
+             * client state issues). Returns a structured {@link BulkResult} for the caller
+             * to handle per-item failures. Does NOT throw on per-item errors.
+             *
+             * @throws IOException on unrecoverable HTTP-level failures (exhausted retries)
+             */
+            private BulkResult executeWithRetry(byte[] requestBody, int docCount,
+                    long batchSizeBytes, boolean compressed)
                     throws IOException, InterruptedException {
                 String endpoint = "/" + spec.getConnectionConf().getIndex() + "/_bulk";
 
                 BackOff backoff = retryBackoff.backoff();
                 int attempt = 0;
+                int maxAttempts = spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1;
 
                 while (true) {
-                    HttpEntity responseEntity = null;
                     HttpEntity rawResponseEntity = null;
                     try {
                         // Validate client state before making request
@@ -1058,7 +1156,6 @@ public class ElasticsearchIO {
                             restClient = spec.getConnectionConf().getPooledClient();
                         }
 
-                        // Use ByteArrayEntity directly — avoids byte[]→String→byte[] round-trip
                         Request request = new Request("POST", endpoint);
                         request.setEntity(new ByteArrayEntity(requestBody, ContentType.APPLICATION_JSON));
                         if (compressed) {
@@ -1070,23 +1167,21 @@ public class ElasticsearchIO {
                         Response response = restClient.performRequest(request);
                         rawResponseEntity = response.getEntity();
 
-                        // Buffer response immediately so the HTTP connection is freed,
-                        // and the entity can be safely read multiple times (retry predicate + checkForErrors)
+                        // Buffer response so the HTTP connection is freed immediately
                         byte[] responseBytes = EntityUtils.toByteArray(rawResponseEntity);
-                        responseEntity = new ByteArrayEntity(responseBytes, ContentType.APPLICATION_JSON);
+                        HttpEntity bufferedEntity = new ByteArrayEntity(responseBytes, ContentType.APPLICATION_JSON);
 
-                        // Check for errors in response
-                        checkForErrors(responseEntity, esVersion, false);
+                        // Parse per-item results — does NOT throw on per-item failures
+                        BulkResult result = parseBulkResponse(bufferedEntity, esVersion, false);
 
-                        // Update metrics
-                        totalDocuments.add(docCount);
-                        totalBatches.increment();
+                        logger.debug("Bulk response: {} succeeded, {} retryable failures, {} non-retryable failures",
+                            result.successCount, result.retryableFailures.size(),
+                            result.nonRetryableFailures.size());
 
-                        logger.debug("Successfully flushed batch of {} documents ({} bytes)",
-                            docCount, batchSizeBytes);
-                        return;
+                        return result;
 
-                    } catch (Exception e) {
+                    } catch (IOException | IllegalStateException e) {
+                        // HTTP-level failure — connection refused, timeout, stale client
                         attempt++;
                         totalErrors.increment();
 
@@ -1095,13 +1190,10 @@ public class ElasticsearchIO {
                                 || (e.getCause() != null && e.getCause() instanceof IllegalStateException)) {
                             logger.warn("IllegalStateException detected - client may be closed. Recreating client...");
                             try {
-                                // Force recreation of client by removing from pool
                                 String currentPoolKey = spec.getConnectionConf().getPoolKey();
                                 clientPool.remove(currentPoolKey);
                                 restClient = spec.getConnectionConf().getPooledClient();
                                 logger.info("Successfully recreated RestClient after IllegalStateException");
-                                // Reset retry budget — the previous failures were due to client state,
-                                // not ES rejecting the data
                                 attempt = 0;
                                 backoff = retryBackoff.backoff();
                             } catch (Exception recreateEx) {
@@ -1109,37 +1201,20 @@ public class ElasticsearchIO {
                             }
                         }
 
-                        int maxAttempts = spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1;
                         if (attempt >= maxAttempts) {
                             logger.error(RETRY_FAILED_LOG, attempt);
-                            throw new IOException("Failed to write batch after " + attempt + " attempts", e);
+                            throw new IOException("Failed to send bulk request after " + attempt + " attempts", e);
                         }
 
                         logger.warn(RETRY_ATTEMPT_LOG, attempt);
 
-                        // Retry connection failures (IOException), not just HTTP 429
-                        boolean shouldRetry = false;
-                        if (spec.getRetryConf() != null) {
-                            if (responseEntity != null) {
-                                shouldRetry = spec.getRetryConf().getRetryPredicate().test(responseEntity);
-                            } else if (e instanceof IOException || e instanceof IllegalStateException) {
-                                // Retry on connection/client state failures
-                                shouldRetry = true;
-                            }
+                        long backoffMillis = backoff.nextBackOffMillis();
+                        if (backoffMillis == BackOff.STOP) {
+                            throw new IOException("Backoff exhausted after " + attempt + " attempts", e);
                         }
+                        Sleeper.DEFAULT.sleep(backoffMillis);
 
-                        if (shouldRetry) {
-                            long backoffMillis = backoff.nextBackOffMillis();
-                            if (backoffMillis == BackOff.STOP) {
-                                throw new IOException("Backoff exhausted after " + attempt + " attempts", e);
-                            }
-                            Sleeper.DEFAULT.sleep(backoffMillis);
-                        } else {
-                            throw new IOException("Non-retryable error", e);
-                        }
                     } finally {
-                        // Ensure the raw HTTP response stream is fully consumed so the
-                        // connection can be returned to the pool (prevents connection starvation)
                         if (rawResponseEntity != null) {
                             EntityUtils.consumeQuietly(rawResponseEntity);
                         }
@@ -1217,6 +1292,71 @@ public class ElasticsearchIO {
             }
             throw new IOException(errorMessages.toString());
         }
+    }
+
+    // Retryable status codes — shared between DefaultRetryPredicate and parseBulkResponse
+    private static final Set<Integer> RETRYABLE_STATUS_CODES =
+        new HashSet<>(Arrays.asList(429, 500, 502, 503, 504));
+
+    /**
+     * Parses a bulk API response into a structured {@link BulkResult} with per-item
+     * success/failure classification. Unlike {@link #checkForErrors}, this method
+     * does NOT throw on per-item errors — it returns them for the caller to handle.
+     *
+     * @throws IOException only if the response JSON is malformed or unreadable
+     */
+    static BulkResult parseBulkResponse(HttpEntity responseEntity, int esVersion,
+            boolean partialUpdate) throws IOException {
+        JsonNode searchResult = parseResponse(responseEntity);
+        JsonNode items = searchResult.path("items");
+        int totalItems = items.size();
+
+        // Fast path: no errors at all
+        if (!searchResult.path("errors").asBoolean()) {
+            return new BulkResult(totalItems,
+                new ArrayList<>(0), new ArrayList<>(0));
+        }
+
+        // Slow path: classify each failed item
+        int successCount = 0;
+        List<BulkResult.FailedDoc> retryable = new ArrayList<>();
+        List<BulkResult.FailedDoc> nonRetryable = new ArrayList<>();
+
+        int index = 0;
+        for (JsonNode item : items) {
+            // Determine the operation root name
+            String opName;
+            if (partialUpdate) {
+                opName = "update";
+            } else {
+                opName = (esVersion == 2) ? "create" : "index";
+            }
+
+            JsonNode opResult = item.path(opName);
+            int status = opResult.path("status").asInt(0);
+            JsonNode error = opResult.get("error");
+
+            if (error == null && status >= 200 && status < 300) {
+                // Success
+                successCount++;
+            } else if (error != null) {
+                String errorType = error.path("type").asText("");
+                String errorReason = error.path("reason").asText("");
+
+                if (RETRYABLE_STATUS_CODES.contains(status)) {
+                    retryable.add(new BulkResult.FailedDoc(index, status, errorType, errorReason));
+                } else {
+                    nonRetryable.add(new BulkResult.FailedDoc(index, status, errorType, errorReason));
+                }
+            } else {
+                // No error object but not a 2xx status — count as success
+                // (some ES versions return status without error for certain operations)
+                successCount++;
+            }
+            index++;
+        }
+
+        return new BulkResult(successCount, retryable, nonRetryable);
     }
 
     private static void maybeLogVersionDeprecationWarning(int clusterVersion) {
