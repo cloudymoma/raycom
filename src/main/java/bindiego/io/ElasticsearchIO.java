@@ -61,9 +61,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -133,8 +136,8 @@ public class ElasticsearchIO {
     private static final ConcurrentHashMap<String, RestClient> clientPool = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Integer> versionCache = new ConcurrentHashMap<>();
 
-    // Shared scheduler for time-based operations
-    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+    // Note: scheduler is now instance-scoped in AppendFn (see @Setup/@Teardown)
+    // to avoid cross-pipeline interference when multiple pipelines share the JVM.
 
     // Performance metrics
     private static final AtomicLong totalDocuments = new AtomicLong(0);
@@ -185,10 +188,22 @@ public class ElasticsearchIO {
         // added for ignore self-signed certs
         public abstract boolean isIgnoreInsecureSSL();
 
-        // Connection pooling key for reuse
+        /**
+         * Connection pooling key for client reuse. Includes all security-relevant fields
+         * so that connections with different credentials, SSL settings, or keystores
+         * are never incorrectly shared.
+         */
         public String getPoolKey() {
-            return getAddress() + ":" + getIndex() + ":" +
-                   (getUsername() != null ? getUsername() : "noauth");
+            StringBuilder key = new StringBuilder();
+            key.append(getAddress()).append('|')
+               .append(getIndex()).append('|')
+               .append(getUsername() != null ? getUsername() : "noauth").append('|')
+               .append(getPassword() != null ? getPassword().hashCode() : 0).append('|')
+               .append(getApiKey() != null ? getApiKey().hashCode() : 0).append('|')
+               .append(isIgnoreInsecureSSL()).append('|')
+               .append(isTrustSelfSignedCerts()).append('|')
+               .append(getKeystorePath() != null ? getKeystorePath() : "nokeys");
+            return key.toString();
         }
 
         abstract Builder builder();
@@ -307,6 +322,17 @@ public class ElasticsearchIO {
                                 }
 
                                 if (isIgnoreInsecureSSL()) {
+                                    // SECURITY WARNING: This disables ALL TLS certificate verification.
+                                    // An attacker in network position can intercept all traffic including
+                                    // credentials and documents (MITM attack).
+                                    String env = System.getenv("ENVIRONMENT");
+                                    if ("production".equalsIgnoreCase(env) || "prod".equalsIgnoreCase(env)) {
+                                        throw new IllegalStateException(
+                                            "isIgnoreInsecureSSL is FORBIDDEN in production environments. " +
+                                            "Configure proper TLS certificates via keystorePath instead.");
+                                    }
+                                    logger.warn("*** INSECURE SSL IS ENABLED — ALL CERTIFICATE VERIFICATION DISABLED ***");
+                                    logger.warn("*** DO NOT USE IN PRODUCTION — VULNERABLE TO MITM ATTACKS ***");
                                     try {
                                         SSLContext context = SSLContext.getInstance("TLS");
 
@@ -615,8 +641,17 @@ public class ElasticsearchIO {
             // Performance optimization: reuse byte buffers
             private transient ThreadLocal<ByteArrayOutputStream> byteBufferPool;
 
+            // Instance-scoped scheduler for time-based flushing (not static — avoids cross-pipeline interference)
+            private transient ScheduledExecutorService scheduler;
+
             // Store ScheduledFuture to cancel on bundle finish
             private transient ScheduledFuture<?> flushTask;
+
+            // Dedicated IO executor — avoids starving ForkJoinPool.commonPool() with blocking HTTP calls
+            private transient ExecutorService ioExecutor;
+
+            // Backpressure: limits concurrent in-flight ES requests
+            private transient Semaphore concurrencySemaphore;
 
             // transient ConcurrentLinkedQueue — lock-free, no serialization issue
             private transient Queue<CompletableFuture<Void>> pendingOperations;
@@ -638,6 +673,17 @@ public class ElasticsearchIO {
 
                 // Initialize ThreadLocal after deserialization
                 byteBufferPool = ThreadLocal.withInitial(() -> new ByteArrayOutputStream(8192));
+
+                // Instance-scoped scheduler — each DoFn instance gets its own, avoiding
+                // cross-pipeline interference when cleanup() is called
+                scheduler = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory("es-flush-" + poolKey));
+
+                // Dedicated IO thread pool for ES bulk requests — never starves ForkJoinPool.commonPool()
+                int maxConcurrent = spec.getMaxConcurrentRequests();
+                ioExecutor = Executors.newFixedThreadPool(maxConcurrent, daemonThreadFactory("es-io-" + poolKey));
+
+                // Semaphore enforces the configured maxConcurrentRequests as actual backpressure
+                concurrencySemaphore = new Semaphore(maxConcurrent);
 
                 // Use cached version or get from server
                 esVersion = versionCache.computeIfAbsent(poolKey, k -> {
@@ -686,10 +732,20 @@ public class ElasticsearchIO {
                 currentBatchSizeBytes = new AtomicLong(0);
                 lastFlushTime = System.currentTimeMillis();
 
-                // Schedule periodic flush and store the future for cancellation
+                // Schedule periodic flush and store the future for cancellation.
+                // IMPORTANT: scheduleAtFixedRate silently suppresses exceptions — if the
+                // task throws, it stops running with no notification. We wrap in try-catch
+                // to log and continue, preventing silent flush death.
                 if (spec.getFlushIntervalMillis() > 0) {
                     flushTask = scheduler.scheduleAtFixedRate(
-                        this::timeBasedFlush,
+                        () -> {
+                            try {
+                                timeBasedFlush();
+                            } catch (Throwable t) {
+                                totalErrors.incrementAndGet();
+                                logger.error("Scheduled flush task failed — flush will continue on next interval", t);
+                            }
+                        },
                         spec.getFlushIntervalMillis(),
                         spec.getFlushIntervalMillis(),
                         TimeUnit.MILLISECONDS
@@ -767,6 +823,35 @@ public class ElasticsearchIO {
                     flushTask.cancel(false);
                     flushTask = null;
                 }
+
+                // Shutdown instance-scoped scheduler
+                if (scheduler != null) {
+                    scheduler.shutdown();
+                    try {
+                        if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                            scheduler.shutdownNow();
+                        }
+                    } catch (InterruptedException e) {
+                        scheduler.shutdownNow();
+                        Thread.currentThread().interrupt();
+                    }
+                    scheduler = null;
+                }
+
+                // Shutdown dedicated IO executor
+                if (ioExecutor != null) {
+                    ioExecutor.shutdown();
+                    try {
+                        if (!ioExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                            ioExecutor.shutdownNow();
+                        }
+                    } catch (InterruptedException e) {
+                        ioExecutor.shutdownNow();
+                        Thread.currentThread().interrupt();
+                    }
+                    ioExecutor = null;
+                }
+
                 // Don't close pooled clients - they're shared
                 if (pendingOperations != null) {
                     pendingOperations.clear();
@@ -793,7 +878,16 @@ public class ElasticsearchIO {
                     lastFlushTime = System.currentTimeMillis();
                 }
 
-                // Process batch asynchronously
+                // Enforce backpressure: block if too many batches are in-flight
+                try {
+                    concurrencySemaphore.acquire();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    logger.warn("Interrupted while waiting for backpressure semaphore", e);
+                    return;
+                }
+
+                // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                     try {
                         processBatch(currentBatch, batchBytes);
@@ -801,13 +895,12 @@ public class ElasticsearchIO {
                         logger.error("Failed to process batch of {} documents", currentBatch.size(), e);
                         totalErrors.incrementAndGet();
                         throw new RuntimeException("Batch processing failed", e);
+                    } finally {
+                        concurrencySemaphore.release();
                     }
-                });
+                }, ioExecutor);
 
                 pendingOperations.add(future);
-
-                // Periodic cleanup of completed futures
-                pendingOperations.removeIf(CompletableFuture::isDone);
             }
 
             private void processBatch(List<String> batchToProcess, long batchSizeBytes)
@@ -949,6 +1042,16 @@ public class ElasticsearchIO {
                     logger.warn("Error during time-based flush", e);
                 }
             }
+
+            /** Creates a daemon ThreadFactory with the given name prefix. */
+            private static ThreadFactory daemonThreadFactory(String prefix) {
+                AtomicInteger counter = new AtomicInteger(0);
+                return r -> {
+                    Thread t = new Thread(r, prefix + "-" + counter.getAndIncrement());
+                    t.setDaemon(true);
+                    return t;
+                };
+            }
         }
     }
 
@@ -1046,11 +1149,15 @@ public class ElasticsearchIO {
     }
 
     /**
-     * Cleanup method for releasing shared resources.
+     * Cleanup method for releasing shared resources (client pool and version cache).
      * Should be called when the application shuts down.
+     *
+     * Note: The scheduler and IO executor are instance-scoped and cleaned up
+     * in AppendFn.closeClient() (@Teardown), so they are NOT managed here.
+     * This prevents one pipeline's cleanup from killing another pipeline's resources.
      */
     public static void cleanup() {
-        logger.info("Cleaning up ElasticsearchIO resources...");
+        logger.info("Cleaning up ElasticsearchIO shared resources...");
 
         // Close all pooled clients
         clientPool.forEach((key, client) -> {
@@ -1062,17 +1169,6 @@ public class ElasticsearchIO {
         });
         clientPool.clear();
         versionCache.clear();
-
-        // Shutdown scheduler
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(10, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
 
         logger.info("ElasticsearchIO cleanup completed. Total documents: {}, batches: {}, errors: {}",
             totalDocuments.get(), totalBatches.get(), totalErrors.get());
