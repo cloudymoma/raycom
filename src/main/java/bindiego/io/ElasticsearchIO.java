@@ -1211,9 +1211,14 @@ public class ElasticsearchIO {
             private void processBatchWithRetry(List<byte[]> docs, long sizeBytes, int retriesLeft,
                     BackOff itemBackoff, long deadlineMillis)
                     throws IOException, InterruptedException {
-                // Build bulk request
+                // Build bulk request. Discard the pooled buffer only when its retained
+                // CAPACITY is well beyond a normal batch (2x the configured byte limit).
+                // The old check discarded on content > 1MB — below the 5MB default batch
+                // size — so the buffer was thrown away and re-grown from 8KB through
+                // ~10 doubling copies on essentially every batch, making the pool a
+                // net pessimization.
                 ExposedByteArrayOutputStream baos = byteBufferPool.get();
-                if (baos.size() > 1024 * 1024) {
+                if (baos.getRawBuffer().length > 2L * spec.getMaxBatchSizeBytes()) {
                     baos = new ExposedByteArrayOutputStream(8192);
                     byteBufferPool.set(baos);
                 }
@@ -1223,6 +1228,7 @@ public class ElasticsearchIO {
 
                 // Compress if needed
                 byte[] requestBody;
+                int requestBodyLen;
                 boolean compressed;
                 if (spec.getEnableCompression() && requestLen > 102400) {
                     ByteArrayOutputStream gzipBaos = new ByteArrayOutputStream(requestLen / 4);
@@ -1230,19 +1236,23 @@ public class ElasticsearchIO {
                         gzip.write(baos.getRawBuffer(), 0, requestLen);
                     }
                     requestBody = gzipBaos.toByteArray();
+                    requestBodyLen = requestBody.length;
                     compressed = true;
                     logger.debug("Compressed batch from {} to {} bytes ({} ratio)",
-                        requestLen, requestBody.length,
-                        String.format("%.1f%%", 100.0 * requestBody.length / requestLen));
+                        requestLen, requestBodyLen,
+                        String.format("%.1f%%", 100.0 * requestBodyLen / requestLen));
                 } else {
-                    requestBody = new byte[requestLen];
-                    System.arraycopy(baos.getRawBuffer(), 0, requestBody, 0, requestLen);
+                    // Zero-copy: hand the pooled buffer straight to the entity. Safe
+                    // because performRequest is synchronous and this thread does not
+                    // touch the ThreadLocal buffer again until the call stack returns.
+                    requestBody = baos.getRawBuffer();
+                    requestBodyLen = requestLen;
                     compressed = false;
                 }
 
                 // Send to ES — returns structured result, does NOT throw on per-item errors
-                BulkResult result = executeWithRetry(requestBody, docs.size(), sizeBytes, compressed,
-                    deadlineMillis);
+                BulkResult result = executeWithRetry(requestBody, requestBodyLen, docs.size(),
+                    sizeBytes, compressed, deadlineMillis);
 
                 // Account for successes
                 totalDocuments.add(result.successCount);
@@ -1313,7 +1323,7 @@ public class ElasticsearchIO {
              *
              * @throws IOException on unrecoverable HTTP-level failures (exhausted retries)
              */
-            private BulkResult executeWithRetry(byte[] requestBody, int docCount,
+            private BulkResult executeWithRetry(byte[] requestBody, int requestBodyLen, int docCount,
                     long batchSizeBytes, boolean compressed, long deadlineMillis)
                     throws IOException, InterruptedException {
                 String endpoint = "/" + spec.getConnectionConf().getIndex() + "/_bulk";
@@ -1332,7 +1342,8 @@ public class ElasticsearchIO {
                         }
 
                         Request request = new Request("POST", endpoint);
-                        request.setEntity(new ByteArrayEntity(requestBody, BULK_CONTENT_TYPE));
+                        // Offset/length form avoids copying the (possibly pooled) buffer
+                        request.setEntity(new ByteArrayEntity(requestBody, 0, requestBodyLen, BULK_CONTENT_TYPE));
                         if (compressed) {
                             request.setOptions(request.getOptions().toBuilder()
                                 .addHeader("Content-Encoding", "gzip")
