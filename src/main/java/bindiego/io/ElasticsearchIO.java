@@ -172,8 +172,88 @@ public class ElasticsearchIO {
     // compute, serializing every DoFn instance's @Setup on one bin lock.
     private static final int TARGET_ES_MAJOR_VERSION = 8;
 
-    // Note: scheduler is now instance-scoped in AppendFn (see @Setup/@Teardown)
-    // to avoid cross-pipeline interference when multiple pipelines share the JVM.
+    /**
+     * Executor resources shared by every AppendFn instance with the same pool key,
+     * reference-counted on @Setup/@Teardown. Dataflow streaming creates one DoFn
+     * instance per processing thread and caches them; giving each instance its own
+     * IO pool, timer thread, and semaphore meant hundreds of threads per worker and
+     * an aggregate in-flight request count of maxConcurrentRequests x instanceCount
+     * hammering the cluster's write threadpool. With sharing, maxConcurrentRequests
+     * bounds the whole worker per connection config. Keying by pool key (rather
+     * than a JVM-wide singleton) keeps unrelated pipelines isolated.
+     */
+    private static final class SharedExecutors {
+        final ScheduledExecutorService scheduler;
+        final ExecutorService ioExecutor;
+        final Semaphore semaphore;
+        final int maxConcurrent;
+        int refCount; // guarded by synchronized (sharedExecutors)
+
+        SharedExecutors(String threadLabel, int maxConcurrent) {
+            this.scheduler = Executors.newSingleThreadScheduledExecutor(
+                daemonThreadFactory("es-flush-" + threadLabel));
+            this.ioExecutor = Executors.newFixedThreadPool(maxConcurrent,
+                daemonThreadFactory("es-io-" + threadLabel));
+            this.semaphore = new Semaphore(maxConcurrent);
+            this.maxConcurrent = maxConcurrent;
+        }
+    }
+
+    private static final Map<String, SharedExecutors> sharedExecutors = new HashMap<>();
+
+    private static SharedExecutors acquireSharedExecutors(
+            String poolKey, String threadLabel, int maxConcurrent) {
+        synchronized (sharedExecutors) {
+            SharedExecutors shared = sharedExecutors.get(poolKey);
+            if (shared == null) {
+                shared = new SharedExecutors(threadLabel, maxConcurrent);
+                sharedExecutors.put(poolKey, shared);
+            } else if (shared.maxConcurrent != maxConcurrent) {
+                logger.warn("Shared ES executors for {} already sized at {} concurrent requests; "
+                    + "ignoring this instance's setting of {}",
+                    threadLabel, shared.maxConcurrent, maxConcurrent);
+            }
+            shared.refCount++;
+            return shared;
+        }
+    }
+
+    private static void releaseSharedExecutors(String poolKey) {
+        SharedExecutors toShutdown = null;
+        synchronized (sharedExecutors) {
+            SharedExecutors shared = sharedExecutors.get(poolKey);
+            if (shared != null && --shared.refCount == 0) {
+                sharedExecutors.remove(poolKey);
+                toShutdown = shared;
+            }
+        }
+        if (toShutdown != null) {
+            shutdownExecutor(toShutdown.scheduler, 5);
+            shutdownExecutor(toShutdown.ioExecutor, 10);
+        }
+    }
+
+    private static void shutdownExecutor(ExecutorService executor, int waitSeconds) {
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(waitSeconds, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Creates a daemon ThreadFactory with the given name prefix. */
+    private static ThreadFactory daemonThreadFactory(String prefix) {
+        AtomicInteger counter = new AtomicInteger(0);
+        return r -> {
+            Thread t = new Thread(r, prefix + "-" + counter.getAndIncrement());
+            t.setDaemon(true);
+            return t;
+        };
+    }
 
     // Performance metrics — LongAdder avoids false sharing under high contention
     // (adjacent AtomicLong fields would share CPU cache lines)
@@ -822,16 +902,16 @@ public class ElasticsearchIO {
             // Performance optimization: reuse byte buffers (exposed subclass avoids toByteArray copy)
             private transient ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool;
 
-            // Instance-scoped scheduler for time-based flushing (not static — avoids cross-pipeline interference)
+            // Shared (per pool key, reference-counted) scheduler for time-based flushing
             private transient ScheduledExecutorService scheduler;
 
-            // Store ScheduledFuture to cancel on bundle finish
+            // This instance's periodic flush task on the shared scheduler
             private transient ScheduledFuture<?> flushTask;
 
-            // Dedicated IO executor — avoids starving ForkJoinPool.commonPool() with blocking HTTP calls
+            // Shared IO executor — avoids starving ForkJoinPool.commonPool() with blocking HTTP calls
             private transient ExecutorService ioExecutor;
 
-            // Backpressure: limits concurrent in-flight ES requests
+            // Shared backpressure: bounds in-flight ES requests per worker, not per instance
             private transient Semaphore concurrencySemaphore;
 
             // transient ConcurrentLinkedQueue — lock-free, no serialization issue
@@ -863,19 +943,18 @@ public class ElasticsearchIO {
                 // Initialize ThreadLocal after deserialization
                 byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
 
-                // Instance-scoped scheduler — each DoFn instance gets its own, avoiding
-                // cross-pipeline interference when cleanup() is called.
-                // Thread names use the REDACTED key: the raw pool key embeds the
-                // username and password/apiKey hashes, and thread names surface in
-                // every stack trace, thread dump, and %t log pattern.
-                scheduler = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory("es-flush-" + poolKeyForLog));
-
-                // Dedicated IO thread pool for ES bulk requests — never starves ForkJoinPool.commonPool()
-                int maxConcurrent = spec.getMaxConcurrentRequests();
-                ioExecutor = Executors.newFixedThreadPool(maxConcurrent, daemonThreadFactory("es-io-" + poolKeyForLog));
-
-                // Semaphore enforces the configured maxConcurrentRequests as actual backpressure
-                concurrencySemaphore = new Semaphore(maxConcurrent);
+                // Executors and the backpressure semaphore are SHARED across all
+                // instances with the same pool key (reference-counted), so
+                // maxConcurrentRequests bounds the whole worker's in-flight requests
+                // instead of multiplying by the DoFn instance count. Thread names use
+                // the REDACTED key: the raw pool key embeds the username and
+                // password/apiKey hashes, and thread names surface in every stack
+                // trace, thread dump, and %t log pattern.
+                SharedExecutors shared = acquireSharedExecutors(
+                    poolKey, poolKeyForLog, spec.getMaxConcurrentRequests());
+                scheduler = shared.scheduler;
+                ioExecutor = shared.ioExecutor;
+                concurrencySemaphore = shared.semaphore;
 
                 // Get pooled client with retry on failure
                 try {
@@ -1043,39 +1122,19 @@ public class ElasticsearchIO {
 
             @Teardown
             public void closeClient() throws IOException {
-                // Ensure scheduled task is cancelled on teardown
+                // Cancel this instance's periodic flush task on the shared scheduler
                 if (flushTask != null) {
                     flushTask.cancel(false);
                     flushTask = null;
                 }
 
-                // Shutdown instance-scoped scheduler
-                if (scheduler != null) {
-                    scheduler.shutdown();
-                    try {
-                        if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                            scheduler.shutdownNow();
-                        }
-                    } catch (InterruptedException e) {
-                        scheduler.shutdownNow();
-                        Thread.currentThread().interrupt();
-                    }
-                    scheduler = null;
+                // Release the shared executors — the last instance out shuts them down
+                if (poolKey != null) {
+                    releaseSharedExecutors(poolKey);
                 }
-
-                // Shutdown dedicated IO executor
-                if (ioExecutor != null) {
-                    ioExecutor.shutdown();
-                    try {
-                        if (!ioExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                            ioExecutor.shutdownNow();
-                        }
-                    } catch (InterruptedException e) {
-                        ioExecutor.shutdownNow();
-                        Thread.currentThread().interrupt();
-                    }
-                    ioExecutor = null;
-                }
+                scheduler = null;
+                ioExecutor = null;
+                concurrencySemaphore = null;
 
                 // Don't close pooled clients - they're shared
                 if (pendingOperations != null) {
@@ -1455,15 +1514,6 @@ public class ElasticsearchIO {
                 }
             }
 
-            /** Creates a daemon ThreadFactory with the given name prefix. */
-            private static ThreadFactory daemonThreadFactory(String prefix) {
-                AtomicInteger counter = new AtomicInteger(0);
-                return r -> {
-                    Thread t = new Thread(r, prefix + "-" + counter.getAndIncrement());
-                    t.setDaemon(true);
-                    return t;
-                };
-            }
         }
     }
 
@@ -1607,11 +1657,11 @@ public class ElasticsearchIO {
     }
 
     /**
-     * Cleanup method for releasing shared resources (client pool and version cache).
+     * Cleanup method for releasing the shared client pool.
      * Should be called when the application shuts down.
      *
-     * Note: The scheduler and IO executor are instance-scoped and cleaned up
-     * in AppendFn.closeClient() (@Teardown), so they are NOT managed here.
+     * Note: The scheduler and IO executor are reference-counted per pool key and
+     * released in AppendFn.closeClient() (@Teardown), so they are NOT managed here.
      * This prevents one pipeline's cleanup from killing another pipeline's resources.
      */
     public static void cleanup() {
