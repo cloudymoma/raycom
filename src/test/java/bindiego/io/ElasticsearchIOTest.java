@@ -788,8 +788,10 @@ public class ElasticsearchIOTest {
     @Test
     public void appendBuilder_defaultPendingTimeout() {
         ElasticsearchIO.Append append = ElasticsearchIO.append();
-        assertEquals("Default pending timeout should be 60s",
-            60L, append.getPendingTimeoutSeconds());
+        // Must exceed the default 120s socket timeout so FinishBundle never
+        // abandons a bulk request that is still legitimately in flight.
+        assertEquals("Default pending timeout should be 300s",
+            300L, append.getPendingTimeoutSeconds());
     }
 
     @Test
