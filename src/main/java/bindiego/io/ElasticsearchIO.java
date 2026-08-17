@@ -801,12 +801,15 @@ public class ElasticsearchIO {
                 byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
 
                 // Instance-scoped scheduler — each DoFn instance gets its own, avoiding
-                // cross-pipeline interference when cleanup() is called
-                scheduler = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory("es-flush-" + poolKey));
+                // cross-pipeline interference when cleanup() is called.
+                // Thread names use the REDACTED key: the raw pool key embeds the
+                // username and password/apiKey hashes, and thread names surface in
+                // every stack trace, thread dump, and %t log pattern.
+                scheduler = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory("es-flush-" + poolKeyForLog));
 
                 // Dedicated IO thread pool for ES bulk requests — never starves ForkJoinPool.commonPool()
                 int maxConcurrent = spec.getMaxConcurrentRequests();
-                ioExecutor = Executors.newFixedThreadPool(maxConcurrent, daemonThreadFactory("es-io-" + poolKey));
+                ioExecutor = Executors.newFixedThreadPool(maxConcurrent, daemonThreadFactory("es-io-" + poolKeyForLog));
 
                 // Semaphore enforces the configured maxConcurrentRequests as actual backpressure
                 concurrencySemaphore = new Semaphore(maxConcurrent);
