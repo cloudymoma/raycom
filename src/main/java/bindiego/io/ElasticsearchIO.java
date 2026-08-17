@@ -1442,13 +1442,21 @@ public class ElasticsearchIO {
             }
 
             JsonNode opResult = item.path(opName);
+            if (opResult.isMissingNode()) {
+                // The item lacks the expected op key. Never assume success for a shape
+                // we cannot interpret — the old fallback (status 0, no error → success)
+                // accounted entire batches as indexed while nothing was written.
+                nonRetryable.add(new BulkResult.FailedDoc(index, 0,
+                    "unexpected_response_shape",
+                    "bulk item has no '" + opName + "' result: " + item));
+                index++;
+                continue;
+            }
+
             int status = opResult.path("status").asInt(0);
             JsonNode error = opResult.get("error");
 
-            if (error == null && status >= 200 && status < 300) {
-                // Success
-                successCount++;
-            } else if (error != null) {
+            if (error != null) {
                 String errorType = error.path("type").asText("");
                 String errorReason = error.path("reason").asText("");
 
@@ -1457,10 +1465,16 @@ public class ElasticsearchIO {
                 } else {
                     nonRetryable.add(new BulkResult.FailedDoc(index, status, errorType, errorReason));
                 }
-            } else {
-                // No error object but not a 2xx status — count as success
-                // (some ES versions return status without error for certain operations)
+            } else if (status >= 200 && status < 300) {
                 successCount++;
+            } else {
+                // Non-2xx status without an error object — classify by status code
+                // instead of the old behavior of counting it as a success.
+                if (RETRYABLE_STATUS_CODES.contains(status)) {
+                    retryable.add(new BulkResult.FailedDoc(index, status, "", ""));
+                } else {
+                    nonRetryable.add(new BulkResult.FailedDoc(index, status, "", ""));
+                }
             }
             index++;
         }
