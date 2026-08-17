@@ -149,6 +149,14 @@ public class ElasticsearchIO {
     static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 30000;
     static final int DEFAULT_SOCKET_TIMEOUT_MILLIS = 120000;
 
+    // HTTP connection pool ceiling. The Apache async client defaults (30 total /
+    // 10 per route) silently capped the whole JVM at 10 concurrent bulk requests
+    // against a single-host cluster, regardless of maxConcurrentRequests — excess
+    // requests queued invisibly inside the connection manager while burning
+    // socket-timeout and pending-timeout budget.
+    static final int MAX_CONN_TOTAL = 100;
+    static final int MAX_CONN_PER_ROUTE = 100;
+
     // This connector targets Elasticsearch 7/8, whose bulk responses both use the
     // "index" op name. The former startup version probe was worse than useless: its
     // catch-all swallowed the cluster-version validation it existed for (any failure
@@ -372,11 +380,10 @@ public class ElasticsearchIO {
             }
 
             // Single consolidated HttpClientConfigCallback — prevents the old bug where
-            // the keystore block silently overwrote credentials, thread config, and SSL settings
-            boolean needsCallback = null != getUsername() || null != getNumThread()
-                || isIgnoreInsecureSSL() || keystoreSslContext != null;
-
-            if (needsCallback) {
+            // the keystore block silently overwrote credentials, thread config, and SSL
+            // settings. Installed UNCONDITIONALLY: connection pool sizing and socket
+            // tuning must apply to every configuration, not just authenticated ones.
+            {
                 final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
                 if (null != getUsername())
                     credentialsProvider.setCredentials(
@@ -391,14 +398,25 @@ public class ElasticsearchIO {
                                     httpAsyncClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
                                 }
 
-                                if (null != getNumThread()) {
-                                    httpAsyncClientBuilder.setDefaultIOReactorConfig(
-                                        IOReactorConfig.custom()
-                                            .setIoThreadCount(getNumThread().intValue())
-                                            .setTcpNoDelay(true)
-                                            .setSoKeepAlive(true)
-                                            .build());
-                                }
+                                // Raise the connection pool ceiling above the Apache
+                                // defaults (30/10) so configured concurrency is real.
+                                httpAsyncClientBuilder
+                                    .setMaxConnTotal(MAX_CONN_TOTAL)
+                                    .setMaxConnPerRoute(MAX_CONN_PER_ROUTE);
+
+                                // Socket tuning applies regardless of numThread:
+                                // keepalive matters on GCP, where Cloud NAT idles out
+                                // established connections after 30s and half-dead pooled
+                                // connections otherwise surface as IOExceptions that burn
+                                // a full retry cycle before recovering.
+                                httpAsyncClientBuilder.setDefaultIOReactorConfig(
+                                    IOReactorConfig.custom()
+                                        .setIoThreadCount(getNumThread() != null
+                                            ? getNumThread().intValue()
+                                            : Runtime.getRuntime().availableProcessors())
+                                        .setTcpNoDelay(true)
+                                        .setSoKeepAlive(true)
+                                        .build());
 
                                 // Keystore-based SSL (takes priority over insecure SSL)
                                 if (keystoreSslContext != null) {
