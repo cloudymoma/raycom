@@ -1342,6 +1342,11 @@ public class ElasticsearchIO {
                         }
 
                         Request request = new Request("POST", endpoint);
+                        // Only errors/status/error are read from the response; without
+                        // filter_path a 1000-doc bulk response is ~150-250KB of JSON
+                        // (_index, _id, _version, _shards, _seq_no, ... per item) that
+                        // is parsed and immediately discarded.
+                        request.addParameter("filter_path", "took,errors,items.*.status,items.*.error");
                         // Offset/length form avoids copying the (possibly pooled) buffer
                         request.setEntity(new ByteArrayEntity(requestBody, 0, requestBodyLen, BULK_CONTENT_TYPE));
                         if (compressed) {
@@ -1353,12 +1358,15 @@ public class ElasticsearchIO {
                         Response response = restClient.performRequest(request);
                         rawResponseEntity = response.getEntity();
 
-                        // Buffer response so the HTTP connection is freed immediately
-                        byte[] responseBytes = EntityUtils.toByteArray(rawResponseEntity);
-                        HttpEntity bufferedEntity = new ByteArrayEntity(responseBytes, ContentType.APPLICATION_JSON);
-
-                        // Parse per-item results — does NOT throw on per-item failures
-                        BulkResult result = parseBulkResponse(bufferedEntity, TARGET_ES_MAJOR_VERSION, false);
+                        // The low-level RestClient already hands back a fully
+                        // heap-buffered entity (the connection is free), so the former
+                        // EntityUtils.toByteArray + re-wrap was a redundant full copy
+                        // of the response body.
+                        // Parse per-item results — does NOT throw on per-item failures.
+                        // docCount seeds the no-errors fast path so it does not depend
+                        // on the filtered response's item list.
+                        BulkResult result = parseBulkResponse(rawResponseEntity,
+                            TARGET_ES_MAJOR_VERSION, false, docCount);
 
                         logger.debug("Bulk response: {} succeeded, {} retryable failures, {} non-retryable failures",
                             result.successCount, result.retryableFailures.size(),
@@ -1511,13 +1519,23 @@ public class ElasticsearchIO {
      */
     static BulkResult parseBulkResponse(HttpEntity responseEntity, int esVersion,
             boolean partialUpdate) throws IOException {
+        return parseBulkResponse(responseEntity, esVersion, partialUpdate, -1);
+    }
+
+    /**
+     * @param expectedItemCount number of documents sent in the bulk request; used as
+     *     the success count on the no-errors fast path so the result does not depend
+     *     on the response's item list (which may be shaped by {@code filter_path}).
+     *     Pass -1 to fall back to counting the response items.
+     */
+    static BulkResult parseBulkResponse(HttpEntity responseEntity, int esVersion,
+            boolean partialUpdate, int expectedItemCount) throws IOException {
         JsonNode searchResult = parseResponse(responseEntity);
         JsonNode items = searchResult.path("items");
-        int totalItems = items.size();
 
         // Fast path: no errors at all
         if (!searchResult.path("errors").asBoolean()) {
-            return new BulkResult(totalItems,
+            return new BulkResult(expectedItemCount >= 0 ? expectedItemCount : items.size(),
                 new ArrayList<>(0), new ArrayList<>(0));
         }
 
