@@ -72,6 +72,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.zip.Deflater;
 import java.util.zip.GZIPOutputStream;
@@ -971,6 +972,11 @@ public class ElasticsearchIO {
             // commit the bundle past work that is in flight but untracked.
             private transient AtomicInteger unregisteredFlushes;
 
+            // First failure from a self-removed future (see flushBatch): completed
+            // futures leave pendingOperations eagerly, so their errors must be
+            // captured separately for FinishBundle to propagate.
+            private transient AtomicReference<Throwable> firstAsyncFailure;
+
             // IO threads have no Beam metrics container, so async completions
             // accumulate here and are drained into the Beam counters on the bundle
             // thread in @FinishBundle. (Counts from a failed bundle drain with the
@@ -997,6 +1003,7 @@ public class ElasticsearchIO {
                 // Initialize lock-free queue after deserialization
                 pendingOperations = new ConcurrentLinkedQueue<>();
                 unregisteredFlushes = new AtomicInteger(0);
+                firstAsyncFailure = new AtomicReference<>();
 
                 asyncDocsIndexed = new LongAdder();
                 asyncDocsFailedNonRetryable = new LongAdder();
@@ -1091,6 +1098,7 @@ public class ElasticsearchIO {
                 // bundle on the previous bundle's errors; the failed bundle is being
                 // retried by the runner anyway, so its data is not lost.
                 pendingOperations.clear();
+                firstAsyncFailure.set(null);
             }
 
             @ProcessElement
@@ -1179,24 +1187,30 @@ public class ElasticsearchIO {
                 }
 
                 CompletableFuture<Void>[] futures = pendingOperations.toArray(new CompletableFuture[0]);
-                if (futures.length == 0) {
-                    return;
+                if (futures.length > 0) {
+                    try {
+                        long remainingNanos = Math.max(1L, deadlineNanos - System.nanoTime());
+                        CompletableFuture.allOf(futures).get(remainingNanos, TimeUnit.NANOSECONDS);
+                        logger.debug("All {} pending operations completed successfully", futures.length);
+                    } catch (TimeoutException e) {
+                        totalErrors.increment();
+                        throw new IOException(
+                            "Elasticsearch operations timed out after " + timeoutSecs + "s — potential data loss for "
+                            + futures.length + " pending batches", e);
+                    } catch (ExecutionException e) {
+                        totalErrors.increment();
+                        throw new IOException("Elasticsearch batch operation failed", e.getCause());
+                    } finally {
+                        pendingOperations.clear();
+                    }
                 }
 
-                try {
-                    long remainingNanos = Math.max(1L, deadlineNanos - System.nanoTime());
-                    CompletableFuture.allOf(futures).get(remainingNanos, TimeUnit.NANOSECONDS);
-                    logger.debug("All {} pending operations completed successfully", futures.length);
-                } catch (TimeoutException e) {
+                // Failed futures may have self-removed before the snapshot was taken;
+                // their captured error must still fail the bundle.
+                Throwable asyncFailure = firstAsyncFailure.getAndSet(null);
+                if (asyncFailure != null) {
                     totalErrors.increment();
-                    throw new IOException(
-                        "Elasticsearch operations timed out after " + timeoutSecs + "s — potential data loss for "
-                        + futures.length + " pending batches", e);
-                } catch (ExecutionException e) {
-                    totalErrors.increment();
-                    throw new IOException("Elasticsearch batch operation failed", e.getCause());
-                } finally {
-                    pendingOperations.clear();
+                    throw new IOException("Elasticsearch batch operation failed", asyncFailure);
                 }
             }
 
@@ -1296,6 +1310,16 @@ public class ElasticsearchIO {
                         }, ioExecutor);
                         submitted = true;
                         pendingOperations.add(future);
+                        // Self-remove on completion so the queue stays bounded by the
+                        // in-flight set (and stops pinning each batch's byte[]s) instead
+                        // of growing for the whole bundle. Failures are captured first so
+                        // FinishBundle still sees them after the future leaves the queue.
+                        future.whenComplete((v, t) -> {
+                            if (t != null) {
+                                firstAsyncFailure.compareAndSet(null, t);
+                            }
+                            pendingOperations.remove(future);
+                        });
                     } finally {
                         // runAsync throws synchronously (RejectedExecutionException) if the
                         // executor was shut down — the task body never runs, so the permit
