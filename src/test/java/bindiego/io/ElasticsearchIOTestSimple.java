@@ -113,7 +113,7 @@ public class ElasticsearchIOTestSimple {
     public void testAppend_defaultConfiguration() {
         ElasticsearchIO.Append append = ElasticsearchIO.append();
         
-        assertEquals(1000L, append.getMaxBatchSize());
+        assertEquals(3000L, append.getMaxBatchSize());
         assertEquals(5L * 1024L * 1024L, append.getMaxBatchSizeBytes());
         assertEquals(30000L, append.getFlushIntervalMillis());
         // Compression defaults ON: log JSON gzips ~8-12x
