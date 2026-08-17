@@ -736,7 +736,8 @@ public class ElasticsearchIO {
 
             private transient FluentBackoff retryBackoff;
             private final Append spec;
-            private transient RestClient restClient;
+            // volatile: read and replaced concurrently by multiple ioExecutor threads
+            private transient volatile RestClient restClient;
 
             // transient lock — ReentrantLock is not Serializable
             private transient Object batchLock;
@@ -1289,7 +1290,19 @@ public class ElasticsearchIO {
                             logger.warn("IllegalStateException detected - client may be closed. Recreating client...");
                             try {
                                 String currentPoolKey = spec.getConnectionConf().getPoolKey();
-                                clientPool.remove(currentPoolKey);
+                                // Evict only the exact instance we observed failing — a blind
+                                // remove() could evict a healthy client another IO thread just
+                                // recreated. Close the evicted client: dropping the reference
+                                // leaked its HTTP IO-reactor threads and open sockets on every
+                                // recovery cycle.
+                                RestClient stale = restClient;
+                                if (stale != null && clientPool.remove(currentPoolKey, stale)) {
+                                    try {
+                                        stale.close();
+                                    } catch (IOException closeEx) {
+                                        logger.warn("Error closing stale RestClient", closeEx);
+                                    }
+                                }
                                 restClient = spec.getConnectionConf().getPooledClient();
                                 logger.info("Successfully recreated RestClient after IllegalStateException");
                                 // Deliberately NOT resetting attempt/backoff here: doing so
