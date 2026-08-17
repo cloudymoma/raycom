@@ -490,6 +490,23 @@ public class ElasticsearchIOTest {
         ElasticsearchIO.append().withMaxConcurrentRequests(-1);
     }
 
+    // ---- Deterministic document ids ----
+
+    @Test
+    public void appendBuilder_withIdFn_retained() {
+        ElasticsearchIO.Append append = ElasticsearchIO.append()
+            .withIdFn(doc -> "id-" + doc.length());
+
+        assertNotNull("idFn should be retained by the builder", append.getIdFn());
+        assertEquals("id-2", append.getIdFn().apply("{}"));
+    }
+
+    @Test
+    public void appendBuilder_idFnDefaultsToNull() {
+        // Auto-generated ids remain the default (no behavior change for existing users)
+        assertNull(ElasticsearchIO.append().getIdFn());
+    }
+
     // =========================================================================
     // Backpressure + dedicated executor integration
     // =========================================================================
