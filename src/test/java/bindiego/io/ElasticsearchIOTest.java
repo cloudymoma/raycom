@@ -1150,6 +1150,28 @@ public class ElasticsearchIOTest {
     }
 
     @Test
+    public void connectionConf_commaSeparatedAddresses_accepted() {
+        // Multi-host addresses enable client-side round-robin; each entry must be
+        // an independently parseable URL after trimming.
+        String address = "https://es1.example.com:9200, https://es2.example.com:9200";
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create(address, "my-index");
+        assertEquals(address, conf.getAddress());
+
+        String[] parts = address.split(",");
+        assertEquals(2, parts.length);
+        for (String part : parts) {
+            try {
+                URL url = new URL(part.trim());
+                assertEquals(9200, url.getPort());
+                assertEquals("https", url.getProtocol());
+            } catch (Exception e) {
+                fail("Each comma-separated address must parse as a URL: " + part);
+            }
+        }
+    }
+
+    @Test
     public void connectionConf_differentPortsSameDomain_differentPoolKeys() {
         ElasticsearchIO.ConnectionConf conf1 = ElasticsearchIO.ConnectionConf
             .create("https://es.example.com:9200", "my-index");
