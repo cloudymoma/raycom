@@ -863,11 +863,22 @@ public class ElasticsearchIO {
 
             @StartBundle
             public void startBundle(StartBundleContext context) {
-                // Pre-allocate with estimated capacity for better performance
-                int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
-                batch = new ArrayList<byte[]>(estimatedCapacity);
-                currentBatchSizeBytes = 0;
+                // Reset under batchLock: the instance-scoped scheduler thread reads and
+                // swaps these fields concurrently, and unsynchronized writes here have
+                // no happens-before edge for it (batch is a plain field).
+                synchronized (batchLock) {
+                    // Pre-allocate with estimated capacity for better performance
+                    int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
+                    batch = new ArrayList<byte[]>(estimatedCapacity);
+                    currentBatchSizeBytes = 0;
+                }
                 lastFlushTime = System.currentTimeMillis();
+
+                // Drop futures left behind by a FAILED bundle (@FinishBundle only clears
+                // the queue when it runs). Awaiting them here would fail this healthy
+                // bundle on the previous bundle's errors; the failed bundle is being
+                // retried by the runner anyway, so its data is not lost.
+                pendingOperations.clear();
             }
 
             @ProcessElement
