@@ -83,6 +83,9 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
 
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Distribution;
+import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
@@ -905,6 +908,23 @@ public class ElasticsearchIO {
         }
 
         static class AppendFn extends DoFn<String, Void> {
+            // Beam metrics — visible per-step in the Dataflow UI / Cloud Monitoring,
+            // unlike the JVM-static LongAdders (which aggregate across pipelines and
+            // never reach the runner). The 429 rate and bulk latency distribution are
+            // the two signals every tuning decision for this sink depends on.
+            private static final Counter METRIC_DOCS_INDEXED =
+                Metrics.counter(ElasticsearchIO.class, "docsIndexed");
+            private static final Counter METRIC_DOCS_FAILED_NON_RETRYABLE =
+                Metrics.counter(ElasticsearchIO.class, "docsFailedNonRetryable");
+            private static final Counter METRIC_DOCS_FAILED_RETRIES_EXHAUSTED =
+                Metrics.counter(ElasticsearchIO.class, "docsFailedRetriesExhausted");
+            private static final Counter METRIC_DOCS_DROPPED_OVERSIZED =
+                Metrics.counter(ElasticsearchIO.class, "docsDroppedOversized");
+            private static final Counter METRIC_BULK_ITEMS_REJECTED_429 =
+                Metrics.counter(ElasticsearchIO.class, "bulkItemsRejected429");
+            private static final Distribution METRIC_BULK_LATENCY_MS =
+                Metrics.distribution(ElasticsearchIO.class, "bulkLatencyMillis");
+
             private static final int DEFAULT_RETRY_ON_CONFLICT = 5;
             private static final Duration RETRY_INITIAL_BACKOFF = Duration.standardSeconds(5);
             static final String RETRY_ATTEMPT_LOG = "Error writing to Elasticsearch. Retry attempt[%d]";
@@ -951,6 +971,16 @@ public class ElasticsearchIO {
             // commit the bundle past work that is in flight but untracked.
             private transient AtomicInteger unregisteredFlushes;
 
+            // IO threads have no Beam metrics container, so async completions
+            // accumulate here and are drained into the Beam counters on the bundle
+            // thread in @FinishBundle. (Counts from a failed bundle drain with the
+            // next successful one — attribution shifts, totals stay correct.)
+            private transient LongAdder asyncDocsIndexed;
+            private transient LongAdder asyncDocsFailedNonRetryable;
+            private transient LongAdder asyncDocsFailedRetriesExhausted;
+            private transient LongAdder asyncRejected429;
+            private transient Queue<Long> asyncBulkLatenciesMs;
+
             AppendFn(Append spec) {
                 this.spec = spec;
             }
@@ -967,6 +997,12 @@ public class ElasticsearchIO {
                 // Initialize lock-free queue after deserialization
                 pendingOperations = new ConcurrentLinkedQueue<>();
                 unregisteredFlushes = new AtomicInteger(0);
+
+                asyncDocsIndexed = new LongAdder();
+                asyncDocsFailedNonRetryable = new LongAdder();
+                asyncDocsFailedRetriesExhausted = new LongAdder();
+                asyncRejected429 = new LongAdder();
+                asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
 
                 // Initialize ThreadLocal after deserialization
                 byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
@@ -1069,6 +1105,9 @@ public class ElasticsearchIO {
                 // (byte[] in batch + bulk request buffer + optional gzip = up to 4x amplification)
                 if (docUtf8.length > spec.getMaxBatchSizeBytes()) {
                     totalErrors.increment();
+                    // Counted in the Dataflow UI — an oversized drop must never be
+                    // discoverable only by grepping worker logs.
+                    METRIC_DOCS_DROPPED_OVERSIZED.inc();
                     logger.error("Document exceeds max batch size ({} bytes > {} bytes limit). Skipping.",
                         docUtf8.length, spec.getMaxBatchSizeBytes());
                     return;
@@ -1107,6 +1146,17 @@ public class ElasticsearchIO {
                 // running between bundles; it no-ops on an empty batch.
                 flushBatchAsync();
                 waitForPendingOperations();
+
+                // Drain async accumulators into Beam metrics on the bundle thread —
+                // IO threads have no metrics container of their own.
+                METRIC_DOCS_INDEXED.inc(asyncDocsIndexed.sumThenReset());
+                METRIC_DOCS_FAILED_NON_RETRYABLE.inc(asyncDocsFailedNonRetryable.sumThenReset());
+                METRIC_DOCS_FAILED_RETRIES_EXHAUSTED.inc(asyncDocsFailedRetriesExhausted.sumThenReset());
+                METRIC_BULK_ITEMS_REJECTED_429.inc(asyncRejected429.sumThenReset());
+                Long latencyMs;
+                while ((latencyMs = asyncBulkLatenciesMs.poll()) != null) {
+                    METRIC_BULK_LATENCY_MS.update(latencyMs);
+                }
             }
 
             // Propagate errors instead of silently dropping data
@@ -1356,12 +1406,20 @@ public class ElasticsearchIO {
 
                 // Account for successes
                 totalDocuments.add(result.successCount);
+                asyncDocsIndexed.add(result.successCount);
 
                 // Handle non-retryable failures: log and drop
                 for (BulkResult.FailedDoc f : result.nonRetryableFailures) {
                     logger.error("Non-retryable error on doc index {}: status={}, type={}, reason={}",
                         f.index, f.statusCode, f.errorType, f.errorReason);
                     totalErrors.increment();
+                    asyncDocsFailedNonRetryable.increment();
+                }
+
+                for (BulkResult.FailedDoc f : result.retryableFailures) {
+                    if (f.statusCode == 429) {
+                        asyncRejected429.increment();
+                    }
                 }
 
                 // Handle retryable failures: extract failed docs and retry
@@ -1401,6 +1459,7 @@ public class ElasticsearchIO {
                                 f.index, f.statusCode, f.errorType, f.errorReason);
                         }
                         totalErrors.add(result.retryableFailures.size());
+                        asyncDocsFailedRetriesExhausted.add(result.retryableFailures.size());
                         throw new IOException("Failed to index " + result.retryableFailures.size() +
                             " documents after exhausting retries");
                     }
@@ -1475,7 +1534,9 @@ public class ElasticsearchIO {
                                 .build());
                         }
 
+                        long requestStartMillis = System.currentTimeMillis();
                         Response response = restClient.performRequest(request);
+                        asyncBulkLatenciesMs.add(System.currentTimeMillis() - requestStartMillis);
                         rawResponseEntity = response.getEntity();
 
                         // The low-level RestClient already hands back a fully
