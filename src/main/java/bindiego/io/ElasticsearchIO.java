@@ -144,6 +144,11 @@ public class ElasticsearchIO {
     // Connection pool for reusing clients across instances
     private static final ConcurrentHashMap<String, RestClient> clientPool = new ConcurrentHashMap<>();
 
+    // Default HTTP timeouts, shared by the request config callback and the
+    // pending-timeout sanity check in Append.expand().
+    static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 30000;
+    static final int DEFAULT_SOCKET_TIMEOUT_MILLIS = 120000;
+
     // This connector targets Elasticsearch 7/8, whose bulk responses both use the
     // "index" op name. The former startup version probe was worse than useless: its
     // catch-all swallowed the cluster-version validation it existed for (any failure
@@ -168,7 +173,9 @@ public class ElasticsearchIO {
             .setFlushIntervalMillis(30000L) // 30 seconds default flush interval
             .setEnableCompression(false)
             .setMaxConcurrentRequests(5)
-            .setPendingTimeoutSeconds(60L)
+            // Must comfortably exceed the socket timeout plus retry backoffs — see
+            // the sanity check in Append.expand().
+            .setPendingTimeoutSeconds(300L)
             .build();
     }
 
@@ -452,10 +459,10 @@ public class ElasticsearchIO {
                             RequestConfig.Builder requestConfigBuilder) {
                         // Default 30s connect timeout to prevent indefinite hangs against unresponsive nodes
                         requestConfigBuilder.setConnectTimeout(
-                            getConnectTimeout() != null ? getConnectTimeout() : 30000);
+                            getConnectTimeout() != null ? getConnectTimeout() : DEFAULT_CONNECT_TIMEOUT_MILLIS);
                         // Default 120s socket timeout for bulk operations
                         requestConfigBuilder.setSocketTimeout(
-                            getSocketTimeout() != null ? getSocketTimeout() : 120000);
+                            getSocketTimeout() != null ? getSocketTimeout() : DEFAULT_SOCKET_TIMEOUT_MILLIS);
 
                         return requestConfigBuilder;
                     }
@@ -730,6 +737,18 @@ public class ElasticsearchIO {
         public PDone expand(PCollection<String> input) {
             ConnectionConf connectionConf = getConnectionConf();
             checkState(null != connectionConf, "withConnectionConf() is required");
+
+            // A single bulk request may legitimately run up to the socket timeout
+            // (plus retry backoffs). A pending timeout at or below it guarantees
+            // FinishBundle gives up on requests that are still in flight, failing the
+            // bundle — and bundle retries re-index every already-written document.
+            // Fail at pipeline construction instead of at runtime.
+            int socketTimeoutMillis = connectionConf.getSocketTimeout() != null
+                ? connectionConf.getSocketTimeout() : DEFAULT_SOCKET_TIMEOUT_MILLIS;
+            checkState(getPendingTimeoutSeconds() * 1000L > socketTimeoutMillis,
+                "pendingTimeoutSeconds (%s s) must exceed the socket timeout (%s ms), "
+                + "or FinishBundle will abandon bulk requests that are still in flight",
+                getPendingTimeoutSeconds(), socketTimeoutMillis);
 
             input.apply(ParDo.of(new AppendFn(this)));
             return PDone.in(input.getPipeline());
