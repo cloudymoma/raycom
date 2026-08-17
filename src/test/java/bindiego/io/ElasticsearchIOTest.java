@@ -3,7 +3,6 @@ package bindiego.io;
 import static org.junit.Assert.*;
 
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -562,105 +561,8 @@ public class ElasticsearchIOTest {
     // Phase 2 Tests
     // =========================================================================
 
-    // ---- Task 2.4: Expanded retryable HTTP status codes ----
-
-    @Test
-    public void retryPredicate_retries429() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":429}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertTrue("429 should be retryable", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_retries500() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":500}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertTrue("500 should be retryable", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_retries502() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":502}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertTrue("502 should be retryable", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_retries503() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":503}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertTrue("503 should be retryable", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_retries504() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":504}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertTrue("504 should be retryable", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_doesNotRetry400() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":400}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertFalse("400 should NOT be retryable", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_doesNotRetry404() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"status\":404}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertFalse("404 should NOT be retryable", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_noErrorsReturnsFalse() throws Exception {
-        String body = "{\"errors\":false,\"items\":[{\"index\":{\"status\":200}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate();
-        assertFalse("No errors should not trigger retry", predicate.test(entity));
-    }
-
-    @Test
-    public void retryPredicate_singleCodeConstructor() throws Exception {
-        // The single-code constructor should only retry the specified code
-        String body429 = "{\"errors\":true,\"items\":[{\"index\":{\"status\":429}}]}";
-        String body500 = "{\"errors\":true,\"items\":[{\"index\":{\"status\":500}}]}";
-        ElasticsearchIO.DefaultRetryPredicate predicate = new ElasticsearchIO.DefaultRetryPredicate(429);
-        HttpEntity entity429 = new ByteArrayEntity(body429.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        HttpEntity entity500 = new ByteArrayEntity(body500.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        assertTrue("Single-code predicate should retry 429", predicate.test(entity429));
-        assertFalse("Single-code predicate should NOT retry 500", predicate.test(entity500));
-    }
-
-    // ---- Task 2.5: checkForErrors ----
-
-    @Test
-    public void checkForErrors_noErrors_doesNotThrow() throws Exception {
-        String body = "{\"errors\":false,\"items\":[{\"index\":{\"status\":201,\"_id\":\"1\"}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        // Should not throw
-        ElasticsearchIO.checkForErrors(entity, 8, false);
-    }
-
-    @Test(expected = IOException.class)
-    public void checkForErrors_withErrors_throwsIOException() throws Exception {
-        String body = "{\"errors\":true,\"items\":[{\"index\":{\"_id\":\"1\",\"status\":400,\"error\":{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse\"}}}]}";
-        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
-        ElasticsearchIO.checkForErrors(entity, 8, false);
-    }
-
-    @Test(expected = IOException.class)
-    public void checkForErrors_nullEntity_throwsIOException() throws Exception {
-        ElasticsearchIO.checkForErrors(null, 8, false);
-    }
+    // Retryable-status classification is covered by the parseBulkResponse tests
+    // below (the RetryPredicate/checkForErrors code paths were removed as dead code).
 
     // ---- Task 2.8: toString redaction ----
 
