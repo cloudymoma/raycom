@@ -1147,9 +1147,20 @@ public class ElasticsearchIO {
                 if (batchToProcess.isEmpty()) {
                     return;
                 }
-                int maxRetries = spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1;
+                RetryConf retryConf = spec.getRetryConf();
+                int maxRetries = retryConf != null ? retryConf.getMaxAttempts() : 1;
+                // ONE wall-clock retry budget shared by both retry layers (item-level
+                // partial-failure retries and HTTP-level request retries). Applying
+                // maxAttempts independently at each layer multiplied to maxAttempts²
+                // requests per batch, hammering a cluster that was already struggling.
+                // Without a RetryConf there are no backoff sleeps, so the budget value
+                // is moot — 30s is a safe bound.
+                long retryBudgetMillis = retryConf != null
+                    ? retryConf.getMaxDuration().getMillis() : 30_000L;
+                long deadlineMillis = System.currentTimeMillis() + retryBudgetMillis;
                 totalBatches.increment();
-                processBatchWithRetry(batchToProcess, batchSizeBytes, maxRetries);
+                processBatchWithRetry(batchToProcess, batchSizeBytes, maxRetries,
+                    retryBackoff.backoff(), deadlineMillis);
             }
 
             /**
@@ -1158,7 +1169,8 @@ public class ElasticsearchIO {
              * logged and dropped — retrying them would fail again AND cause duplicate
              * indexing of the docs that already succeeded.
              */
-            private void processBatchWithRetry(List<byte[]> docs, long sizeBytes, int retriesLeft)
+            private void processBatchWithRetry(List<byte[]> docs, long sizeBytes, int retriesLeft,
+                    BackOff itemBackoff, long deadlineMillis)
                     throws IOException, InterruptedException {
                 // Build bulk request
                 ExposedByteArrayOutputStream baos = byteBufferPool.get();
@@ -1190,7 +1202,8 @@ public class ElasticsearchIO {
                 }
 
                 // Send to ES — returns structured result, does NOT throw on per-item errors
-                BulkResult result = executeWithRetry(requestBody, docs.size(), sizeBytes, compressed);
+                BulkResult result = executeWithRetry(requestBody, docs.size(), sizeBytes, compressed,
+                    deadlineMillis);
 
                 // Account for successes
                 totalDocuments.add(result.successCount);
@@ -1204,7 +1217,15 @@ public class ElasticsearchIO {
 
                 // Handle retryable failures: extract failed docs and retry
                 if (!result.retryableFailures.isEmpty()) {
-                    if (retriesLeft > 0) {
+                    // Jittered exponential backoff (FluentBackoff randomizes) instead of
+                    // the old fixed 5s sleep: constant delays synchronized every worker's
+                    // retries into a thundering herd that re-triggered ES 429 rejections.
+                    // The shared deadline caps total time across recursion levels.
+                    long backoffMillis = retriesLeft > 0 ? itemBackoff.nextBackOffMillis() : BackOff.STOP;
+                    boolean budgetExhausted = backoffMillis == BackOff.STOP
+                        || System.currentTimeMillis() + backoffMillis >= deadlineMillis;
+
+                    if (retriesLeft > 0 && !budgetExhausted) {
                         List<byte[]> retryDocs = new ArrayList<>(result.retryableFailures.size());
                         long retryBytes = 0;
                         for (BulkResult.FailedDoc f : result.retryableFailures) {
@@ -1212,19 +1233,18 @@ public class ElasticsearchIO {
                             retryDocs.add(doc);
                             retryBytes += doc.length;
                         }
-                        logger.warn("Retrying {} failed docs (out of {}), {} retries remaining",
-                            retryDocs.size(), docs.size(), retriesLeft - 1);
+                        logger.warn("Retrying {} failed docs (out of {}) after {} ms, {} retries remaining",
+                            retryDocs.size(), docs.size(), backoffMillis, retriesLeft - 1);
 
-                        // Backoff before retry
                         try {
-                            Sleeper.DEFAULT.sleep(
-                                Duration.standardSeconds(5).getMillis());
+                            Sleeper.DEFAULT.sleep(backoffMillis);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                             throw e;
                         }
 
-                        processBatchWithRetry(retryDocs, retryBytes, retriesLeft - 1);
+                        processBatchWithRetry(retryDocs, retryBytes, retriesLeft - 1,
+                            itemBackoff, deadlineMillis);
                     } else {
                         // Exhausted retries — log all remaining failures
                         for (BulkResult.FailedDoc f : result.retryableFailures) {
@@ -1255,7 +1275,7 @@ public class ElasticsearchIO {
              * @throws IOException on unrecoverable HTTP-level failures (exhausted retries)
              */
             private BulkResult executeWithRetry(byte[] requestBody, int docCount,
-                    long batchSizeBytes, boolean compressed)
+                    long batchSizeBytes, boolean compressed, long deadlineMillis)
                     throws IOException, InterruptedException {
                 String endpoint = "/" + spec.getConnectionConf().getIndex() + "/_bulk";
 
@@ -1340,8 +1360,11 @@ public class ElasticsearchIO {
                         logger.warn(RETRY_ATTEMPT_LOG, attempt);
 
                         long backoffMillis = backoff.nextBackOffMillis();
-                        if (backoffMillis == BackOff.STOP) {
-                            throw new IOException("Backoff exhausted after " + attempt + " attempts", e);
+                        // The deadline is shared with the item-level retry layer so the
+                        // combined budget is bounded by RetryConf.maxDuration.
+                        if (backoffMillis == BackOff.STOP
+                                || System.currentTimeMillis() + backoffMillis >= deadlineMillis) {
+                            throw new IOException("Retry budget exhausted after " + attempt + " attempts", e);
                         }
                         Sleeper.DEFAULT.sleep(backoffMillis);
 
