@@ -767,6 +767,12 @@ public class ElasticsearchIO {
             // transient ConcurrentLinkedQueue — lock-free, no serialization issue
             private transient Queue<CompletableFuture<Void>> pendingOperations;
 
+            // Count of flushes that have swapped the batch out but not yet registered
+            // their future in pendingOperations (or restored the batch). FinishBundle
+            // must not snapshot pendingOperations while this is non-zero, or it can
+            // commit the bundle past work that is in flight but untracked.
+            private transient AtomicInteger unregisteredFlushes;
+
             AppendFn(Append spec) {
                 this.spec = spec;
             }
@@ -782,6 +788,7 @@ public class ElasticsearchIO {
 
                 // Initialize lock-free queue after deserialization
                 pendingOperations = new ConcurrentLinkedQueue<>();
+                unregisteredFlushes = new AtomicInteger(0);
 
                 // Initialize ThreadLocal after deserialization
                 byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
@@ -933,14 +940,31 @@ public class ElasticsearchIO {
 
             // Propagate errors instead of silently dropping data
             private void waitForPendingOperations() throws IOException, InterruptedException {
+                long timeoutSecs = spec.getPendingTimeoutSeconds();
+                long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSecs);
+
+                // A scheduler-tick flush may have swapped the batch out but not yet
+                // registered its future (flushTask.cancel-style races don't apply here:
+                // the tick keeps running until it hands off or restores). Snapshotting
+                // pendingOperations before that hand-off would let the bundle commit
+                // past in-flight, unacknowledged documents.
+                while (unregisteredFlushes.get() > 0) {
+                    if (System.nanoTime() >= deadlineNanos) {
+                        totalErrors.increment();
+                        throw new IOException("Timed out after " + timeoutSecs
+                            + "s waiting for an in-flight flush to hand off its batch");
+                    }
+                    Thread.sleep(1);
+                }
+
                 CompletableFuture<Void>[] futures = pendingOperations.toArray(new CompletableFuture[0]);
                 if (futures.length == 0) {
                     return;
                 }
 
-                long timeoutSecs = spec.getPendingTimeoutSeconds();
                 try {
-                    CompletableFuture.allOf(futures).get(timeoutSecs, TimeUnit.SECONDS);
+                    long remainingNanos = Math.max(1L, deadlineNanos - System.nanoTime());
+                    CompletableFuture.allOf(futures).get(remainingNanos, TimeUnit.NANOSECONDS);
                     logger.debug("All {} pending operations completed successfully", futures.length);
                 } catch (TimeoutException e) {
                     totalErrors.increment();
@@ -1027,53 +1051,63 @@ public class ElasticsearchIO {
                     batch = new ArrayList<byte[]>(estimatedCapacity);
                     currentBatchSizeBytes = 0;
                     lastFlushTime = System.currentTimeMillis();
+
+                    // From this point until the future is in pendingOperations (or the
+                    // batch is restored), the documents are invisible to FinishBundle.
+                    unregisteredFlushes.incrementAndGet();
                 }
 
-                // Enforce backpressure: block if too many batches are in-flight
-                if (mayBlock) {
-                    try {
-                        concurrencySemaphore.acquire();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        // The swapped-out batch is the only reference to these documents.
-                        // Restore it and fail loud — returning silently here would let the
-                        // bundle commit (and Pub/Sub ack) without the data ever being sent.
-                        restoreBatch(currentBatch, batchBytes);
-                        throw new RuntimeException(
-                            "Interrupted while waiting for Elasticsearch backpressure permit; "
-                            + currentBatch.size() + " documents restored to the pending batch", e);
-                    }
-                } else {
-                    if (!concurrencySemaphore.tryAcquire()) {
-                        restoreBatch(currentBatch, batchBytes);
-                        return;
-                    }
-                }
-
-                // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
-                boolean submitted = false;
                 try {
-                    CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                    // Enforce backpressure: block if too many batches are in-flight
+                    if (mayBlock) {
                         try {
-                            processBatch(currentBatch, batchBytes);
-                        } catch (Exception e) {
-                            logger.error("Failed to process batch of {} documents", currentBatch.size(), e);
-                            totalErrors.increment();
-                            throw new RuntimeException("Batch processing failed", e);
-                        } finally {
-                            concurrencySemaphore.release();
+                            concurrencySemaphore.acquire();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            // The swapped-out batch is the only reference to these documents.
+                            // Restore it and fail loud — returning silently here would let the
+                            // bundle commit (and Pub/Sub ack) without the data ever being sent.
+                            restoreBatch(currentBatch, batchBytes);
+                            throw new RuntimeException(
+                                "Interrupted while waiting for Elasticsearch backpressure permit; "
+                                + currentBatch.size() + " documents restored to the pending batch", e);
                         }
-                    }, ioExecutor);
-                    submitted = true;
-                    pendingOperations.add(future);
-                } finally {
-                    // runAsync throws synchronously (RejectedExecutionException) if the
-                    // executor was shut down — the task body never runs, so the permit
-                    // acquired above would leak and the batch would vanish untracked.
-                    if (!submitted) {
-                        concurrencySemaphore.release();
-                        restoreBatch(currentBatch, batchBytes);
+                    } else {
+                        if (!concurrencySemaphore.tryAcquire()) {
+                            restoreBatch(currentBatch, batchBytes);
+                            return;
+                        }
                     }
+
+                    // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
+                    boolean submitted = false;
+                    try {
+                        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                            try {
+                                processBatch(currentBatch, batchBytes);
+                            } catch (Exception e) {
+                                logger.error("Failed to process batch of {} documents", currentBatch.size(), e);
+                                totalErrors.increment();
+                                throw new RuntimeException("Batch processing failed", e);
+                            } finally {
+                                concurrencySemaphore.release();
+                            }
+                        }, ioExecutor);
+                        submitted = true;
+                        pendingOperations.add(future);
+                    } finally {
+                        // runAsync throws synchronously (RejectedExecutionException) if the
+                        // executor was shut down — the task body never runs, so the permit
+                        // acquired above would leak and the batch would vanish untracked.
+                        if (!submitted) {
+                            concurrencySemaphore.release();
+                            restoreBatch(currentBatch, batchBytes);
+                        }
+                    }
+                } finally {
+                    // Either the future is registered or the batch was restored — both
+                    // make the documents visible to FinishBundle again.
+                    unregisteredFlushes.decrementAndGet();
                 }
             }
 
