@@ -290,6 +290,12 @@ public class ElasticsearchIO {
             abstract ConnectionConf build();
         }
 
+        /**
+         * @param address one node URL, or a comma-separated list of node URLs
+         *     (e.g. {@code "https://es1:9200,https://es2:9200"}) for client-side
+         *     round-robin across coordinating/data nodes
+         * @param index the target index for bulk appends
+         */
         public static ConnectionConf create(String address, String index) {
             checkArgument(null != address, "address can not be null");
             checkArgument(index != null, "index can not be null");
@@ -350,9 +356,18 @@ public class ElasticsearchIO {
         }
 
         private RestClientBuilder createClientBuilder() throws IOException {
-            HttpHost[] esHosts = new HttpHost[1];
-            URL url = new URL(getAddress());
-            esHosts[0] = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+            // The address may be a comma-separated list of node URLs. RestClient
+            // round-robins across the hosts it is given; a single host funnels every
+            // bulk request through one coordinating node, making it both the
+            // throughput ceiling and a single point of failure — and the per-route
+            // connection limit applies per host, so one host also means one route's
+            // worth of connections.
+            String[] addresses = getAddress().split(",");
+            HttpHost[] esHosts = new HttpHost[addresses.length];
+            for (int i = 0; i < addresses.length; i++) {
+                URL url = new URL(addresses[i].trim());
+                esHosts[i] = new HttpHost(url.getHost(), url.getPort(), url.getProtocol());
+            }
 
             RestClientBuilder restClientBuilder = RestClient.builder(esHosts);
 
