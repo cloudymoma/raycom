@@ -1292,8 +1292,11 @@ public class ElasticsearchIO {
                                 clientPool.remove(currentPoolKey);
                                 restClient = spec.getConnectionConf().getPooledClient();
                                 logger.info("Successfully recreated RestClient after IllegalStateException");
-                                attempt = 0;
-                                backoff = retryBackoff.backoff();
+                                // Deliberately NOT resetting attempt/backoff here: doing so
+                                // made the while(true) loop unbounded when the client kept
+                                // getting closed (e.g. concurrent pool churn or an external
+                                // cleanup()), pinning an IO thread and a backpressure permit
+                                // forever. Recreation attempts count toward maxAttempts.
                             } catch (Exception recreateEx) {
                                 logger.error("Failed to recreate RestClient", recreateEx);
                             }
