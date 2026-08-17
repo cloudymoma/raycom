@@ -1006,8 +1006,13 @@ public class ElasticsearchIO {
                     concurrencySemaphore.acquire();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    logger.warn("Interrupted while waiting for backpressure semaphore", e);
-                    return;
+                    // The swapped-out batch is the only reference to these documents.
+                    // Restore it and fail loud — returning silently here would let the
+                    // bundle commit (and Pub/Sub ack) without the data ever being sent.
+                    restoreBatch(currentBatch, batchBytes);
+                    throw new RuntimeException(
+                        "Interrupted while waiting for Elasticsearch backpressure permit; "
+                        + currentBatch.size() + " documents restored to the pending batch", e);
                 }
 
                 // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
@@ -1024,6 +1029,19 @@ public class ElasticsearchIO {
                 }, ioExecutor);
 
                 pendingOperations.add(future);
+            }
+
+            /**
+             * Puts a swapped-out batch back at the head of the pending batch so no
+             * documents are lost when a flush could not be handed off to the IO executor.
+             */
+            private void restoreBatch(List<byte[]> docs, long docBytes) {
+                synchronized (batchLock) {
+                    // docs are older than anything accumulated since the swap — keep order
+                    docs.addAll(batch);
+                    batch = docs;
+                    currentBatchSizeBytes += docBytes;
+                }
             }
 
             private void processBatch(List<byte[]> batchToProcess, long batchSizeBytes)
