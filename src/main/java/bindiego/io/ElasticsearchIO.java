@@ -263,7 +263,11 @@ public class ElasticsearchIO {
 
     public static Append append() {
         return new AutoValue_ElasticsearchIO_Append.Builder()
-            .setMaxBatchSize(1000L)
+            // Doc-count cap sized so the BYTE budget is the binding constraint for
+            // typical 1-2KB log documents: at the old 1000-doc cap, batches flushed
+            // at ~1-2MB and the 5MB budget was never reached, so bulk requests were
+            // systematically smaller than intended.
+            .setMaxBatchSize(3000L)
             .setMaxBatchSizeBytes(5L * 1024L * 1024L)
             .setFlushIntervalMillis(30000L) // 30 seconds default flush interval
             // On by default: GCLB/CDN log JSON is highly repetitive (identical field

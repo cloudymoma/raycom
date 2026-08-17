@@ -461,7 +461,8 @@ public class ElasticsearchIOTest {
     public void appendBuilder_defaultBatchSize() {
         ElasticsearchIO.Append append = ElasticsearchIO.append();
 
-        assertEquals("Default maxBatchSize should be 1000", 1000L, append.getMaxBatchSize());
+        // Sized so the 5MB byte budget binds first for typical 1-2KB log docs
+        assertEquals("Default maxBatchSize should be 3000", 3000L, append.getMaxBatchSize());
     }
 
     @Test
