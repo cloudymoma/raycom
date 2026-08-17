@@ -143,7 +143,14 @@ public class ElasticsearchIO {
 
     // Connection pool for reusing clients across instances
     private static final ConcurrentHashMap<String, RestClient> clientPool = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<String, Integer> versionCache = new ConcurrentHashMap<>();
+
+    // This connector targets Elasticsearch 7/8, whose bulk responses both use the
+    // "index" op name. The former startup version probe was worse than useless: its
+    // catch-all swallowed the cluster-version validation it existed for (any failure
+    // — including "unsupported version" — silently became 8 and was cached for the
+    // JVM lifetime), and it performed DNS/TLS/HTTP inside a ConcurrentHashMap
+    // compute, serializing every DoFn instance's @Setup on one bin lock.
+    private static final int TARGET_ES_MAJOR_VERSION = 8;
 
     // Note: scheduler is now instance-scoped in AppendFn (see @Setup/@Teardown)
     // to avoid cross-pipeline interference when multiple pipelines share the JVM.
@@ -745,8 +752,7 @@ public class ElasticsearchIO {
             private transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
             private volatile long lastFlushTime;
 
-            // Connection pooling and version caching
-            private int esVersion;
+            // Connection pooling
             private transient String poolKey;
             private transient String poolKeyForLog; // redacted version for logging
 
@@ -805,17 +811,6 @@ public class ElasticsearchIO {
                 // Semaphore enforces the configured maxConcurrentRequests as actual backpressure
                 concurrencySemaphore = new Semaphore(maxConcurrent);
 
-                // Use cached version or get from server
-                esVersion = versionCache.computeIfAbsent(poolKey, k -> {
-                    try {
-                        return getEsVersion(connectionConf);
-                    } catch (Exception e) {
-                        logger.warn("Failed to get ES version from {}, defaulting to 8. Error: {}",
-                            connectionConf.getAddress(), e.getMessage());
-                        return 8;
-                    }
-                });
-
                 // Get pooled client with retry on failure
                 try {
                     restClient = connectionConf.getPooledClient();
@@ -866,7 +861,7 @@ public class ElasticsearchIO {
                     );
                 }
 
-                logger.info("Setup completed for ES version {} with pool key: {}", esVersion, poolKeyForLog);
+                logger.info("Setup completed with pool key: {}", poolKeyForLog);
             }
 
             @StartBundle
@@ -1271,7 +1266,7 @@ public class ElasticsearchIO {
                         HttpEntity bufferedEntity = new ByteArrayEntity(responseBytes, ContentType.APPLICATION_JSON);
 
                         // Parse per-item results — does NOT throw on per-item failures
-                        BulkResult result = parseBulkResponse(bufferedEntity, esVersion, false);
+                        BulkResult result = parseBulkResponse(bufferedEntity, TARGET_ES_MAJOR_VERSION, false);
 
                         logger.debug("Bulk response: {} succeeded, {} retryable failures, {} non-retryable failures",
                             result.successCount, result.retryableFailures.size(),
@@ -1473,52 +1468,6 @@ public class ElasticsearchIO {
         return new BulkResult(successCount, retryable, nonRetryable);
     }
 
-    private static void maybeLogVersionDeprecationWarning(int clusterVersion) {
-        if (DEPRECATED_CLUSTER_VERSIONS.contains(clusterVersion)) {
-            logger.warn(
-                "Support for Elasticsearch cluster version {} will be dropped in a future release of "
-                    + "the Apache Beam SDK & this ElasticsearchIO implementation",
-                clusterVersion);
-        }
-    }
-
-    static int getEsVersion(RestClient restClient) {
-        try {
-            Request request = new Request("GET", "");
-            Response response = restClient.performRequest(request);
-            JsonNode jsonNode = parseResponse(response.getEntity());
-            String versionStr = jsonNode.path("version").path("number").asText();
-            if (versionStr == null || versionStr.isEmpty()) {
-                throw new IOException("Could not determine Elasticsearch version — empty version string in response");
-            }
-            int esVersion = Integer.parseInt(versionStr.substring(0, 1));
-            checkArgument(
-                VALID_CLUSTER_VERSIONS.contains(esVersion),
-                "The Elasticsearch version to connect to is %s.x. "
-                    + "This version of the ElasticsearchIO is only compatible with "
-                    + "Elasticsearch "
-                    + VALID_CLUSTER_VERSIONS,
-                esVersion);
-
-            maybeLogVersionDeprecationWarning(esVersion);
-
-            return esVersion;
-        } catch (IOException ex) {
-            throw new IllegalArgumentException("Cannot get Elasticsearch version", ex);
-        }
-    }
-
-    // Don't close pooled client — use getPooledClient() without try-with-resources
-    static int getEsVersion(ConnectionConf connectionConf) {
-        try {
-            RestClient restClient = connectionConf.getPooledClient();
-            return getEsVersion(restClient);
-        } catch (IOException ex) {
-            throw new IllegalArgumentException("Cannot get Elasticsearch version from " +
-                connectionConf.getAddress() + ": " + ex.getMessage(), ex);
-        }
-    }
-
     /**
      * Cleanup method for releasing shared resources (client pool and version cache).
      * Should be called when the application shuts down.
@@ -1539,7 +1488,6 @@ public class ElasticsearchIO {
             }
         });
         clientPool.clear();
-        versionCache.clear();
 
         logger.info("ElasticsearchIO cleanup completed. Total documents: {}, batches: {}, errors: {}",
             totalDocuments.sum(), totalBatches.sum(), totalErrors.sum());
@@ -1561,8 +1509,4 @@ public class ElasticsearchIO {
 
     // Instantiate Logger
     private static final Logger logger = LoggerFactory.getLogger(ElasticsearchIO.class);
-
-    private static final List<Integer> VALID_CLUSTER_VERSIONS = Arrays.asList(7, 8);
-    private static final Set<Integer> DEPRECATED_CLUSTER_VERSIONS =
-      new HashSet<>(Arrays.asList(5, 6));
 }
