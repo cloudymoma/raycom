@@ -980,6 +980,42 @@ public class ElasticsearchIOTest {
     }
 
     @Test
+    public void parseBulkResponse_missingOpNode_countedAsFailureNotSuccess() throws Exception {
+        // Regression: an item without the expected op key ("index") used to fall into
+        // the permissive fallback and be counted as a SUCCESS.
+        String body = "{\"took\":1,\"errors\":true,\"items\":["
+            + "{\"delete\":{\"_id\":\"1\",\"status\":200}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        assertEquals("Unrecognized item shape must not count as success", 0, result.successCount);
+        assertEquals("Unrecognized item shape is a non-retryable failure",
+            1, result.nonRetryableFailures.size());
+        assertEquals("unexpected_response_shape", result.nonRetryableFailures.get(0).errorType);
+    }
+
+    @Test
+    public void parseBulkResponse_non2xxWithoutError_classifiedByStatus() throws Exception {
+        // Regression: a non-2xx status without an "error" object used to be counted
+        // as a success. It must be classified by status code instead.
+        String body = "{\"took\":1,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":429}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":400}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false);
+
+        assertEquals(0, result.successCount);
+        assertEquals("429 without error object should be retryable", 1, result.retryableFailures.size());
+        assertEquals(429, result.retryableFailures.get(0).statusCode);
+        assertEquals("400 without error object should be non-retryable", 1, result.nonRetryableFailures.size());
+        assertEquals(400, result.nonRetryableFailures.get(0).statusCode);
+    }
+
+    @Test
     public void poolKeyForLogging_differentFromPoolKey() {
         ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
             .create("https://es.example.com:9200", "my-index")
