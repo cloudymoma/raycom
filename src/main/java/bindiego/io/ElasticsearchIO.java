@@ -73,6 +73,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.zip.Deflater;
 import java.util.zip.GZIPOutputStream;
 import java.io.ByteArrayOutputStream;
 
@@ -185,7 +186,11 @@ public class ElasticsearchIO {
             .setMaxBatchSize(1000L)
             .setMaxBatchSizeBytes(5L * 1024L * 1024L)
             .setFlushIntervalMillis(30000L) // 30 seconds default flush interval
-            .setEnableCompression(false)
+            // On by default: GCLB/CDN log JSON is highly repetitive (identical field
+            // names, shared URL prefixes) and gzips ~8-12x, cutting both egress cost
+            // and request latency to the cluster. ES 7/8 accept compressed request
+            // bodies out of the box (http.compression defaults to true).
+            .setEnableCompression(true)
             .setMaxConcurrentRequests(5)
             // Must comfortably exceed the socket timeout plus retry backoffs — see
             // the sanity check in Append.expand().
@@ -1232,7 +1237,13 @@ public class ElasticsearchIO {
                 boolean compressed;
                 if (spec.getEnableCompression() && requestLen > 102400) {
                     ByteArrayOutputStream gzipBaos = new ByteArrayOutputStream(requestLen / 4);
-                    try (GZIPOutputStream gzip = new GZIPOutputStream(gzipBaos)) {
+                    // BEST_SPEED: this runs on an IO thread that is holding a
+                    // backpressure permit. The default level (6) costs ~3x the CPU of
+                    // level 1 for ~10% better ratio — the wrong trade for a
+                    // throughput sink whose payload compresses ~8-12x anyway.
+                    try (GZIPOutputStream gzip = new GZIPOutputStream(gzipBaos) {
+                        { def.setLevel(Deflater.BEST_SPEED); }
+                    }) {
                         gzip.write(baos.getRawBuffer(), 0, requestLen);
                     }
                     requestBody = gzipBaos.toByteArray();
