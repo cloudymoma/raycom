@@ -6,7 +6,6 @@ import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClientBuilder;
-import org.elasticsearch.client.ResponseListener;
 import org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback;
 
 import org.apache.http.Header;
@@ -32,7 +31,6 @@ import org.apache.http.util.EntityUtils;
 
 import com.google.auto.value.AutoValue;
 
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -54,7 +52,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.Queue;
-import java.util.function.Predicate;
 import java.security.cert.X509Certificate;
 import java.security.NoSuchAlgorithmException;
 import java.security.KeyManagementException;
@@ -71,7 +68,6 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.zip.Deflater;
@@ -82,33 +78,22 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
 
-import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
-import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.util.BackOff;
-import org.apache.beam.sdk.util.BackOffUtils;
 import org.apache.beam.sdk.util.FluentBackoff;
 import org.apache.beam.sdk.util.Sleeper;
-import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 
-import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializerProvider;
-import com.fasterxml.jackson.databind.module.SimpleModule;
-import com.fasterxml.jackson.databind.ser.std.StdSerializer;
 
 import org.joda.time.Duration;
 
@@ -655,13 +640,9 @@ public class ElasticsearchIO {
 
     @AutoValue
     public abstract static class RetryConf implements Serializable {
-        static final RetryPredicate DEFAULT_RETRY_PREDICATE = new DefaultRetryPredicate();
-
         abstract int getMaxAttempts();
 
         abstract Duration getMaxDuration();
-
-        abstract RetryPredicate getRetryPredicate();
 
         abstract Builder builder();
 
@@ -670,9 +651,6 @@ public class ElasticsearchIO {
             abstract ElasticsearchIO.RetryConf.Builder setMaxAttempts(int maxAttempts);
 
             abstract ElasticsearchIO.RetryConf.Builder setMaxDuration(Duration maxDuration);
-
-            abstract ElasticsearchIO.RetryConf.Builder setRetryPredicate(
-                RetryPredicate retryPredicate);
 
             abstract ElasticsearchIO.RetryConf build();
         }
@@ -686,63 +664,7 @@ public class ElasticsearchIO {
             return new AutoValue_ElasticsearchIO_RetryConf.Builder()
                 .setMaxAttempts(maxAttempts)
                 .setMaxDuration(maxDuration)
-                .setRetryPredicate(DEFAULT_RETRY_PREDICATE)
                 .build();
-        }
-
-        RetryConf withRetryPredicate(RetryPredicate predicate) {
-            checkArgument(predicate != null, "predicate must be provided");
-
-            return builder().setRetryPredicate(predicate).build();
-        }
-    }
-
-    @FunctionalInterface
-    interface RetryPredicate extends Predicate<HttpEntity>, Serializable {}
-
-    static class DefaultRetryPredicate implements RetryPredicate {
-
-        // Retryable HTTP status codes: throttling + transient server errors
-        private static final Set<Integer> DEFAULT_RETRYABLE_CODES =
-            new HashSet<>(Arrays.asList(429, 500, 502, 503, 504));
-
-        private final Set<Integer> retryableCodes;
-
-        DefaultRetryPredicate(int code) {
-            this.retryableCodes = new HashSet<>(Arrays.asList(code));
-        }
-
-        // Default: retry on TOO_MANY_REQUESTS(429), Internal Server Error(500),
-        // Bad Gateway(502), Service Unavailable(503), Gateway Timeout(504)
-        DefaultRetryPredicate() {
-            this.retryableCodes = DEFAULT_RETRYABLE_CODES;
-        }
-
-        /** Returns true if the response has any retryable error code for any mutation. */
-        private static boolean retryableErrorPresent(HttpEntity responseEntity, Set<Integer> retryableCodes) {
-            if (responseEntity == null) {
-                logger.warn("Response entity is null, cannot check for error codes");
-                return false;
-            }
-            try {
-                JsonNode json = parseResponse(responseEntity);
-                if (json.path("errors").asBoolean()) {
-                    for (JsonNode item : json.path("items")) {
-                        JsonNode statusNode = item.findValue("status");
-                        if (statusNode != null && retryableCodes.contains(statusNode.asInt())) {
-                            return true;
-                        }
-                    }
-                }
-            } catch (IOException e) {
-                logger.warn("Could not extract error codes from responseEntity {}", responseEntity, e);
-            }
-            return false;
-        }
-
-        @Override
-        public boolean test(HttpEntity responseEntity) {
-            return retryableErrorPresent(responseEntity, retryableCodes);
         }
     }
 
@@ -926,7 +848,6 @@ public class ElasticsearchIO {
             private static final Distribution METRIC_BULK_LATENCY_MS =
                 Metrics.distribution(ElasticsearchIO.class, "bulkLatencyMillis");
 
-            private static final int DEFAULT_RETRY_ON_CONFLICT = 5;
             private static final Duration RETRY_INITIAL_BACKOFF = Duration.standardSeconds(5);
             static final String RETRY_ATTEMPT_LOG = "Error writing to Elasticsearch. Retry attempt[%d]";
             static final String RETRY_FAILED_LOG = "Error writing to ES after %d attempt(s). No more attempts allowed";
@@ -1659,57 +1580,14 @@ public class ElasticsearchIO {
         return mapper.readValue(responseEntity.getContent(), JsonNode.class);
     }
 
-    // Use StringBuilder.append() chains instead of String.format in loops
-    static void checkForErrors(HttpEntity responseEntity, int esVersion, boolean partialUpdate)
-        throws IOException {
-        JsonNode searchResult = parseResponse(responseEntity);
-        boolean errors = searchResult.path("errors").asBoolean();
-        if (errors) {
-            StringBuilder errorMessages =
-                new StringBuilder(256);
-            errorMessages.append("Error writing to Elasticsearch, some elements could not be inserted:");
-            JsonNode items = searchResult.path("items");
-            for (JsonNode item : items) {
-
-                String errorRootName = "";
-                if (partialUpdate) {
-                    errorRootName = "update";
-                } else {
-                    if (esVersion == 2) {
-                        errorRootName = "create";
-                    } else if (esVersion >= 5) {
-                        errorRootName = "index";
-                    }
-                }
-                JsonNode errorRoot = item.path(errorRootName);
-                JsonNode error = errorRoot.get("error");
-                if (null != error) {
-                    String type = error.path("type").asText();
-                    String reason = error.path("reason").asText();
-                    String docId = errorRoot.path("_id").asText();
-                    errorMessages.append("\nDocument id ").append(docId)
-                        .append(": ").append(reason).append(" (").append(type).append(")");
-                    JsonNode causedBy = error.get("caused_by");
-                    if (causedBy != null) {
-                        String cbReason = causedBy.path("reason").asText();
-                        String cbType = causedBy.path("type").asText();
-                        errorMessages.append("\nCaused by: ").append(cbReason)
-                            .append(" (").append(cbType).append(")");
-                    }
-                }
-            }
-            throw new IOException(errorMessages.toString());
-        }
-    }
-
-    // Retryable status codes — shared between DefaultRetryPredicate and parseBulkResponse
+    // Retryable HTTP status codes: throttling (429) + transient server errors
     private static final Set<Integer> RETRYABLE_STATUS_CODES =
         new HashSet<>(Arrays.asList(429, 500, 502, 503, 504));
 
     /**
      * Parses a bulk API response into a structured {@link BulkResult} with per-item
-     * success/failure classification. Unlike {@link #checkForErrors}, this method
-     * does NOT throw on per-item errors — it returns them for the caller to handle.
+     * success/failure classification. This method does NOT throw on per-item
+     * errors — it returns them for the caller to handle.
      *
      * @throws IOException only if the response JSON is malformed or unreadable
      */
