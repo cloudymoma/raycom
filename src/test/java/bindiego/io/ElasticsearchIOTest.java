@@ -982,6 +982,19 @@ public class ElasticsearchIOTest {
     }
 
     @Test
+    public void parseBulkResponse_noErrors_usesExpectedCountForFilteredResponses() throws Exception {
+        // With filter_path the success-path response may omit item details entirely;
+        // the caller-supplied document count must drive the success accounting.
+        String body = "{\"took\":5,\"errors\":false}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.BulkResult result = ElasticsearchIO.parseBulkResponse(entity, 8, false, 42);
+
+        assertEquals("Success count must come from the sent doc count", 42, result.successCount);
+        assertFalse(result.hasFailures());
+    }
+
+    @Test
     public void parseBulkResponse_missingOpNode_countedAsFailureNotSuccess() throws Exception {
         // Regression: an item without the expected op key ("index") used to fall into
         // the permissive fallback and be counted as a SUCCESS.
