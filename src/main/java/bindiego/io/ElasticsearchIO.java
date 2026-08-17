@@ -882,14 +882,19 @@ public class ElasticsearchIO {
                     return;
                 }
 
+                boolean flushNow;
                 synchronized (batchLock) {
                     batch.add(docUtf8);
                     currentBatchSizeBytes += docUtf8.length;
+                    flushNow = shouldFlush();
+                }
 
-                    // Check flush conditions
-                    if (shouldFlush()) {
-                        flushBatchAsync();
-                    }
+                // Flush OUTSIDE batchLock: flushBatchAsync() may block on the
+                // backpressure semaphore, and blocking while holding the monitor
+                // would freeze the time-based flusher and stall the whole DoFn on
+                // a single slow Elasticsearch request.
+                if (flushNow) {
+                    flushBatchAsync();
                 }
             }
 
