@@ -116,7 +116,8 @@ public class ElasticsearchIOTestSimple {
         assertEquals(1000L, append.getMaxBatchSize());
         assertEquals(5L * 1024L * 1024L, append.getMaxBatchSizeBytes());
         assertEquals(30000L, append.getFlushIntervalMillis());
-        assertFalse(append.getEnableCompression());
+        // Compression defaults ON: log JSON gzips ~8-12x
+        assertTrue(append.getEnableCompression());
         assertEquals(5, append.getMaxConcurrentRequests());
     }
 
