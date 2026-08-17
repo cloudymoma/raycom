@@ -833,18 +833,12 @@ public class ElasticsearchIO {
                         .withMaxCumulativeBackoff(spec.getRetryConf().getMaxDuration());
                 }
 
-                logger.info("Setup completed for ES version {} with pool key: {}", esVersion, poolKeyForLog);
-            }
-
-            @StartBundle
-            public void startBundle(StartBundleContext context) {
-                // Pre-allocate with estimated capacity for better performance
-                int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
-                batch = new ArrayList<byte[]>(estimatedCapacity);
-                currentBatchSizeBytes = 0;
-                lastFlushTime = System.currentTimeMillis();
-
-                // Schedule periodic flush and store the future for cancellation.
+                // Schedule the periodic flush ONCE for the whole DoFn lifetime and cancel
+                // it in @Teardown. Scheduling per bundle leaked tasks: @FinishBundle is
+                // NOT called when a bundle fails mid-processing, and the retried bundle's
+                // @StartBundle overwrote flushTask — orphaning a live fixed-rate task per
+                // failed bundle. Per-bundle schedule/cancel was also pure churn in
+                // streaming, where bundles finish long before the first tick fires.
                 // IMPORTANT: scheduleAtFixedRate silently suppresses exceptions — if the
                 // task throws, it stops running with no notification. We wrap in try-catch
                 // to log and continue, preventing silent flush death.
@@ -863,6 +857,17 @@ public class ElasticsearchIO {
                         TimeUnit.MILLISECONDS
                     );
                 }
+
+                logger.info("Setup completed for ES version {} with pool key: {}", esVersion, poolKeyForLog);
+            }
+
+            @StartBundle
+            public void startBundle(StartBundleContext context) {
+                // Pre-allocate with estimated capacity for better performance
+                int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
+                batch = new ArrayList<byte[]>(estimatedCapacity);
+                currentBatchSizeBytes = 0;
+                lastFlushTime = System.currentTimeMillis();
             }
 
             @ProcessElement
@@ -908,13 +913,9 @@ public class ElasticsearchIO {
             @FinishBundle
             public void finishBundle(FinishBundleContext context)
                     throws IOException, InterruptedException {
-                // Cancel the scheduled flush task for this bundle
-                if (flushTask != null) {
-                    flushTask.cancel(false);
-                    flushTask = null;
-                }
-
-                // Final flush and wait for all pending operations
+                // Final flush and wait for all pending operations.
+                // The periodic flush task is instance-scoped (see @Setup) and keeps
+                // running between bundles; it no-ops on an empty batch.
                 flushBatchAsync();
                 waitForPendingOperations();
             }
@@ -987,11 +988,22 @@ public class ElasticsearchIO {
             }
 
             private void flushBatchAsync() {
+                flushBatch(true);
+            }
+
+            /**
+             * Swaps out the accumulated batch and hands it to the IO executor.
+             *
+             * @param mayBlock if true (element/bundle threads) block for a backpressure
+             *     permit; if false (scheduler tick) use tryAcquire so the timer thread is
+             *     never parked — on contention the batch is restored and retried next tick.
+             */
+            private void flushBatch(boolean mayBlock) {
                 List<byte[]> currentBatch;
                 long batchBytes;
 
                 synchronized (batchLock) {
-                    if (batch.isEmpty()) {
+                    if (batch == null || batch.isEmpty()) {
                         return;
                     }
 
@@ -1007,17 +1019,24 @@ public class ElasticsearchIO {
                 }
 
                 // Enforce backpressure: block if too many batches are in-flight
-                try {
-                    concurrencySemaphore.acquire();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    // The swapped-out batch is the only reference to these documents.
-                    // Restore it and fail loud — returning silently here would let the
-                    // bundle commit (and Pub/Sub ack) without the data ever being sent.
-                    restoreBatch(currentBatch, batchBytes);
-                    throw new RuntimeException(
-                        "Interrupted while waiting for Elasticsearch backpressure permit; "
-                        + currentBatch.size() + " documents restored to the pending batch", e);
+                if (mayBlock) {
+                    try {
+                        concurrencySemaphore.acquire();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        // The swapped-out batch is the only reference to these documents.
+                        // Restore it and fail loud — returning silently here would let the
+                        // bundle commit (and Pub/Sub ack) without the data ever being sent.
+                        restoreBatch(currentBatch, batchBytes);
+                        throw new RuntimeException(
+                            "Interrupted while waiting for Elasticsearch backpressure permit; "
+                            + currentBatch.size() + " documents restored to the pending batch", e);
+                    }
+                } else {
+                    if (!concurrencySemaphore.tryAcquire()) {
+                        restoreBatch(currentBatch, batchBytes);
+                        return;
+                    }
                 }
 
                 // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
@@ -1259,7 +1278,7 @@ public class ElasticsearchIO {
             private void timeBasedFlush() {
                 try {
                     if (System.currentTimeMillis() - lastFlushTime >= spec.getFlushIntervalMillis()) {
-                        flushBatchAsync();
+                        flushBatch(false); // never block the timer thread
                     }
                 } catch (Exception e) {
                     logger.warn("Error during time-based flush", e);
