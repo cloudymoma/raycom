@@ -134,6 +134,12 @@ public class ElasticsearchIO {
     private static final byte[] INDEX_ACTION_BYTES = "{\"index\":{}}\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NEWLINE_BYTES = "\n".getBytes(StandardCharsets.UTF_8);
 
+    // _bulk bodies are newline-delimited JSON, not a single JSON document. ES 7/8
+    // still accept application/json on _bulk as a backward-compatibility path, but
+    // x-ndjson is the declared media type and the fallback is slated for removal.
+    private static final ContentType BULK_CONTENT_TYPE =
+        ContentType.create("application/x-ndjson", StandardCharsets.UTF_8);
+
     /** Exposes the internal buffer to avoid the copy in {@link ByteArrayOutputStream#toByteArray()}. */
     static class ExposedByteArrayOutputStream extends ByteArrayOutputStream {
         ExposedByteArrayOutputStream(int size) { super(size); }
@@ -1326,7 +1332,7 @@ public class ElasticsearchIO {
                         }
 
                         Request request = new Request("POST", endpoint);
-                        request.setEntity(new ByteArrayEntity(requestBody, ContentType.APPLICATION_JSON));
+                        request.setEntity(new ByteArrayEntity(requestBody, BULK_CONTENT_TYPE));
                         if (compressed) {
                             request.setOptions(request.getOptions().toBuilder()
                                 .addHeader("Content-Encoding", "gzip")
