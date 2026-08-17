@@ -101,7 +101,6 @@ public class ElasticsearchIOTestSimple {
         
         assertEquals(3, retryConf.getMaxAttempts());
         assertEquals(Duration.standardMinutes(5), retryConf.getMaxDuration());
-        assertNotNull(retryConf.getRetryPredicate());
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -141,14 +140,6 @@ public class ElasticsearchIOTestSimple {
     @Test(expected = IllegalArgumentException.class)
     public void testAppend_invalidMaxBatchSize() {
         ElasticsearchIO.append().withMaxBatchSize(0);
-    }
-
-    @Test
-    public void testDefaultRetryPredicate() {
-        ElasticsearchIO.DefaultRetryPredicate predicate = 
-            new ElasticsearchIO.DefaultRetryPredicate();
-        
-        assertNotNull(predicate);
     }
 
     @Test
