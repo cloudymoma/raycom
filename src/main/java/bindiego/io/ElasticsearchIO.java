@@ -131,9 +131,9 @@ public class ElasticsearchIO {
 
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    // Pre-computed constants for bulk request building (avoid per-batch allocation)
+    // Pre-computed auto-id action line for bulk request building (used when no idFn
+    // is configured — see Append.withIdFn for the deterministic-id variant)
     private static final byte[] INDEX_ACTION_BYTES = "{\"index\":{}}\n".getBytes(StandardCharsets.UTF_8);
-    private static final byte[] NEWLINE_BYTES = "\n".getBytes(StandardCharsets.UTF_8);
 
     // _bulk bodies are newline-delimited JSON, not a single JSON document. ES 7/8
     // still accept application/json on _bulk as a backward-compatibility path, but
@@ -798,6 +798,9 @@ public class ElasticsearchIO {
 
         abstract long getPendingTimeoutSeconds();
 
+        @Nullable
+        abstract SerializableFunction<String, String> getIdFn();
+
         abstract Builder builder();
 
         @AutoValue.Builder
@@ -817,6 +820,8 @@ public class ElasticsearchIO {
             abstract Builder setMaxConcurrentRequests(int maxConcurrentRequests);
 
             abstract Builder setPendingTimeoutSeconds(long pendingTimeoutSeconds);
+
+            abstract Builder setIdFn(SerializableFunction<String, String> idFn);
 
             abstract Append build();
         }
@@ -861,6 +866,23 @@ public class ElasticsearchIO {
             return builder().setPendingTimeoutSeconds(pendingTimeoutSeconds).build();
         }
 
+        /**
+         * Derives a deterministic document {@code _id} from each JSON document,
+         * making retries idempotent: without an id, Elasticsearch auto-generates one
+         * per attempt, so an HTTP-level resend of a batch the cluster actually
+         * applied — or a Beam bundle retry — permanently duplicates every document.
+         * GCLB/Media CDN log entries carry {@code insertId}, which is a natural key.
+         *
+         * <p>Tradeoff: explicit ids disable Elasticsearch's append-only auto-id fast
+         * path and cost roughly 10-20% extra indexing CPU (a version lookup per
+         * doc). Returning {@code null} from the function falls back to auto-id for
+         * that document.
+         */
+        public Append withIdFn(SerializableFunction<String, String> idFn) {
+            checkArgument(idFn != null, "idFn can not be null");
+            return builder().setIdFn(idFn).build();
+        }
+
         @Override
         public PDone expand(PCollection<String> input) {
             ConnectionConf connectionConf = getConnectionConf();
@@ -895,7 +917,9 @@ public class ElasticsearchIO {
 
             // transient lock — ReentrantLock is not Serializable
             private transient Object batchLock;
-            private transient List<byte[]> batch;  // Store pre-encoded UTF-8 bytes to avoid double encoding
+            // Each entry is one complete pre-encoded NDJSON bulk unit
+            // (action line + source + trailing newline)
+            private transient List<byte[]> batch;
             private transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
             private volatile long lastFlushTime;
 
@@ -1050,10 +1074,12 @@ public class ElasticsearchIO {
                     return;
                 }
 
+                byte[] unit = buildBulkUnit(doc, docUtf8);
+
                 boolean flushNow;
                 synchronized (batchLock) {
-                    batch.add(docUtf8);
-                    currentBatchSizeBytes += docUtf8.length;
+                    batch.add(unit);
+                    currentBatchSizeBytes += unit.length;
                     flushNow = shouldFlush();
                 }
 
@@ -1381,12 +1407,32 @@ public class ElasticsearchIO {
                 }
             }
 
-            // Docs are pre-encoded byte[] — no per-doc String.getBytes() allocation here
+            /**
+             * Builds one complete NDJSON bulk entry: action line + source + newline.
+             * With an idFn configured, the action line carries a deterministic
+             * {@code _id} so HTTP-level resends and Beam bundle retries overwrite the
+             * same document instead of duplicating it under a fresh auto-id.
+             */
+            private byte[] buildBulkUnit(String doc, byte[] docUtf8) throws IOException {
+                SerializableFunction<String, String> idFn = spec.getIdFn();
+                String id = idFn != null ? idFn.apply(doc) : null;
+                byte[] actionBytes = id == null
+                    ? INDEX_ACTION_BYTES
+                    // writeValueAsString JSON-escapes and quotes the id
+                    : ("{\"index\":{\"_id\":" + mapper.writeValueAsString(id) + "}}\n")
+                        .getBytes(StandardCharsets.UTF_8);
+
+                byte[] unit = new byte[actionBytes.length + docUtf8.length + 1];
+                System.arraycopy(actionBytes, 0, unit, 0, actionBytes.length);
+                System.arraycopy(docUtf8, 0, unit, actionBytes.length, docUtf8.length);
+                unit[unit.length - 1] = '\n';
+                return unit;
+            }
+
+            // Batch entries are complete pre-encoded bulk units — just concatenate
             private void buildBulkRequest(List<byte[]> docs, java.io.OutputStream out) throws IOException {
-                for (byte[] doc : docs) {
-                    out.write(INDEX_ACTION_BYTES);
-                    out.write(doc);
-                    out.write(NEWLINE_BYTES);
+                for (byte[] unit : docs) {
+                    out.write(unit);
                 }
             }
 
