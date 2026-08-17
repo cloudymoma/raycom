@@ -1016,19 +1016,30 @@ public class ElasticsearchIO {
                 }
 
                 // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
-                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    try {
-                        processBatch(currentBatch, batchBytes);
-                    } catch (Exception e) {
-                        logger.error("Failed to process batch of {} documents", currentBatch.size(), e);
-                        totalErrors.increment();
-                        throw new RuntimeException("Batch processing failed", e);
-                    } finally {
+                boolean submitted = false;
+                try {
+                    CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                        try {
+                            processBatch(currentBatch, batchBytes);
+                        } catch (Exception e) {
+                            logger.error("Failed to process batch of {} documents", currentBatch.size(), e);
+                            totalErrors.increment();
+                            throw new RuntimeException("Batch processing failed", e);
+                        } finally {
+                            concurrencySemaphore.release();
+                        }
+                    }, ioExecutor);
+                    submitted = true;
+                    pendingOperations.add(future);
+                } finally {
+                    // runAsync throws synchronously (RejectedExecutionException) if the
+                    // executor was shut down — the task body never runs, so the permit
+                    // acquired above would leak and the batch would vanish untracked.
+                    if (!submitted) {
                         concurrencySemaphore.release();
+                        restoreBatch(currentBatch, batchBytes);
                     }
-                }, ioExecutor);
-
-                pendingOperations.add(future);
+                }
             }
 
             /**
