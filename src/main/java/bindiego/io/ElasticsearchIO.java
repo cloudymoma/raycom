@@ -1070,11 +1070,28 @@ public class ElasticsearchIO {
             @FinishBundle
             public void finishBundle(FinishBundleContext context)
                     throws IOException, InterruptedException {
-                // Final flush and wait for all pending operations.
-                // The periodic flush task is instance-scoped (see @Setup) and keeps
-                // running between bundles; it no-ops on an empty batch.
-                flushBatchAsync();
-                waitForPendingOperations();
+                // Flush and wait until quiescent. A single flush is not enough: a
+                // scheduler tick racing this method can swap the batch out (so our
+                // flush sees it empty) and then fail tryAcquire and RESTORE the
+                // documents into the new batch after our flush already ran. Without
+                // re-checking, the bundle would commit with those documents sitting
+                // unflushed in `batch`, and the next @StartBundle would overwrite
+                // them — silent loss after ack. The loop terminates because no new
+                // elements arrive during @FinishBundle (Beam processes a DoFn
+                // instance serially), so ticks can only swap/restore existing docs,
+                // and waitForPendingOperations' timeout bounds each iteration.
+                while (true) {
+                    flushBatchAsync();
+                    waitForPendingOperations();
+                    synchronized (batchLock) {
+                        // Ticks increment unregisteredFlushes under batchLock at swap
+                        // time, so both clear under the lock means nothing is pending
+                        // and no swap is mid-flight.
+                        if ((batch == null || batch.isEmpty()) && unregisteredFlushes.get() == 0) {
+                            break;
+                        }
+                    }
+                }
 
                 // Drain async accumulators into Beam metrics on the bundle thread —
                 // IO threads have no metrics container of their own.
