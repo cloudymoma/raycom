@@ -1,6 +1,9 @@
 # Project specific
 output-*
 debug
+.espass
+.eshost
+.kbnhost
 
 ##########################
 ## Java
