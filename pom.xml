@@ -38,7 +38,7 @@
     <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
     <sonar-maven-plugin.version>5.1.0.4882</sonar-maven-plugin.version>
 
-    <beam.version>2.66.0</beam.version>
+    <beam.version>2.75.0</beam.version>
 
     <gcp.lib.bom>26.75.0</gcp.lib.bom>
 
@@ -172,6 +172,7 @@
                     <exclude>META-INF/*.SF</exclude>
                     <exclude>META-INF/*.DSA</exclude>
                     <exclude>META-INF/*.RSA</exclude>
+                    <exclude>META-INF/versions/**</exclude>
                   </excludes>
                 </filter>
               </filters>
