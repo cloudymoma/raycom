@@ -1277,4 +1277,72 @@ public class ElasticsearchIOTest {
         assertEquals(doc, lines[1]);
         assertEquals("", lines[2]);
     }
+
+    // =========================================================================
+    // ConnectionConf SSL, Keystore Builders, and Complete PoolKey Tests
+    // =========================================================================
+
+    @Test
+    public void connectionConf_keystoreBuildersAndToStringRedaction() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withKeystorePath("/etc/ssl/certs/es-client.jks")
+            .withKeystorePassword("keystore-secret-pw");
+
+        assertEquals("/etc/ssl/certs/es-client.jks", conf.getKeystorePath());
+        assertEquals("keystore-secret-pw", conf.getKeystorePassword());
+
+        String str = conf.toString();
+        assertTrue(str.contains("keystorePath=/etc/ssl/certs/es-client.jks"));
+        assertFalse("toString must NOT contain keystorePassword", str.contains("keystore-secret-pw"));
+        assertTrue(str.contains("keystorePassword=***"));
+    }
+
+    @Test
+    public void poolKey_includesKeystoreAndClientTuningFields() {
+        ElasticsearchIO.ConnectionConf base = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withKeystorePath("/path/a.jks")
+            .withKeystorePassword("pw1")
+            .withSocketTimeout(60000)
+            .withConnectTimeout(10000)
+            .withNumThread(4);
+
+        assertNotEquals("Different keystorePath must produce different pool key",
+            base.getPoolKey(),
+            base.withKeystorePath("/path/b.jks").getPoolKey());
+        assertNotEquals("Different keystorePassword must produce different pool key",
+            base.getPoolKey(),
+            base.withKeystorePassword("pw2").getPoolKey());
+        assertNotEquals("Different socketTimeout must produce different pool key",
+            base.getPoolKey(),
+            base.withSocketTimeout(90000).getPoolKey());
+        assertNotEquals("Different connectTimeout must produce different pool key",
+            base.getPoolKey(),
+            base.withConnectTimeout(20000).getPoolKey());
+        assertNotEquals("Different numThread must produce different pool key",
+            base.getPoolKey(),
+            base.withNumThread(8).getPoolKey());
+    }
+
+    @Test
+    public void createClientBuilder_standaloneTrustSelfSignedCerts_succeedsWithoutKeystore() throws Exception {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withTrustSelfSignedCerts(true);
+
+        assertNotNull("createClientBuilder should succeed with standalone trustSelfSignedCerts",
+            conf.createClientBuilder());
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void createClientBuilder_missingKeystoreFile_failsFastWithIOException() throws Exception {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withKeystorePath("/nonexistent/path/to/keystore.jks")
+            .withKeystorePassword("secret");
+
+        conf.createClientBuilder();
+    }
 }
+

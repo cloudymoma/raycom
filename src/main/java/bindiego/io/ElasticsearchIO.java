@@ -326,9 +326,10 @@ public class ElasticsearchIO {
         }
 
         /**
-         * Connection pooling key for client reuse. Includes all security-relevant fields
-         * so that connections with different credentials, SSL settings, or keystores
-         * are never incorrectly shared.
+         * Connection pooling key for client reuse. Includes all security-relevant and
+         * client-configuration fields so that connections with different credentials,
+         * SSL settings, keystores, timeouts, or IO thread counts are never incorrectly
+         * shared.
          */
         public String getPoolKey() {
             StringBuilder key = new StringBuilder();
@@ -339,7 +340,11 @@ public class ElasticsearchIO {
                .append(getApiKey() != null ? getApiKey().hashCode() : 0).append('|')
                .append(isIgnoreInsecureSSL()).append('|')
                .append(isTrustSelfSignedCerts()).append('|')
-               .append(getKeystorePath() != null ? getKeystorePath() : "nokeys");
+               .append(getKeystorePath() != null ? getKeystorePath() : "nokeys").append('|')
+               .append(getKeystorePassword() != null ? getKeystorePassword().hashCode() : 0).append('|')
+               .append(getSocketTimeout() != null ? getSocketTimeout() : DEFAULT_SOCKET_TIMEOUT_MILLIS).append('|')
+               .append(getConnectTimeout() != null ? getConnectTimeout() : DEFAULT_CONNECT_TIMEOUT_MILLIS).append('|')
+               .append(getNumThread() != null ? getNumThread() : 0);
             return key.toString();
         }
 
@@ -413,6 +418,16 @@ public class ElasticsearchIO {
             return builder().setApiKey(apiKey).build();
         }
 
+        public ConnectionConf withKeystorePath(String keystorePath) {
+            checkArgument(!Strings.isNullOrEmpty(keystorePath), "keystorePath can not be null or empty");
+            return builder().setKeystorePath(keystorePath).build();
+        }
+
+        public ConnectionConf withKeystorePassword(String keystorePassword) {
+            checkArgument(keystorePassword != null, "keystorePassword can not be null");
+            return builder().setKeystorePassword(keystorePassword).build();
+        }
+
         public ConnectionConf withTrustSelfSignedCerts(boolean trustSelfSignedCerts) {
             return builder().setTrustSelfSignedCerts(trustSelfSignedCerts).build();
         }
@@ -444,7 +459,7 @@ public class ElasticsearchIO {
             return withIgnoreInsecureSSL(ignoreInsecureSSL);
         }
 
-        private RestClientBuilder createClientBuilder() throws IOException {
+        RestClientBuilder createClientBuilder() throws IOException {
             // The address may be a comma-separated list of node URLs. RestClient
             // round-robins across the hosts it is given; a single host funnels every
             // bulk request through one coordinating node, making it both the
@@ -460,9 +475,10 @@ public class ElasticsearchIO {
 
             RestClientBuilder restClientBuilder = RestClient.builder(esHosts);
 
-            // Pre-load keystore SSL context if configured (done outside callback to fail fast)
-            final SSLContext keystoreSslContext;
-            final SSLIOSessionStrategy keystoreSessionStrategy;
+            // Pre-load keystore or standalone self-signed SSL context if configured
+            // (done outside the callback to fail fast on invalid keystore paths/passwords)
+            final SSLContext customSslContext;
+            final SSLIOSessionStrategy customSessionStrategy;
             if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
                 try {
                     KeyStore keyStore = KeyStore.getInstance("jks");
@@ -472,15 +488,27 @@ public class ElasticsearchIO {
                     }
                     final TrustStrategy trustStrategy =
                         isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
-                    keystoreSslContext =
+                    customSslContext =
                         SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
-                    keystoreSessionStrategy = new SSLIOSessionStrategy(keystoreSslContext);
+                    customSessionStrategy = new SSLIOSessionStrategy(customSslContext);
                 } catch (Exception e) {
                     throw new IOException("Can't load the client certificate from the keystore", e);
                 }
+            } else if (isTrustSelfSignedCerts() && !isIgnoreInsecureSSL()) {
+                // Support withTrustSelfSignedCerts(true) even when no local JKS keystorePath
+                // is provided, trusting self-signed certificates while preserving normal
+                // hostname verification (unlike isIgnoreInsecureSSL).
+                try {
+                    customSslContext = SSLContexts.custom()
+                        .loadTrustMaterial(null, new TrustSelfSignedStrategy())
+                        .build();
+                    customSessionStrategy = new SSLIOSessionStrategy(customSslContext);
+                } catch (Exception e) {
+                    throw new IOException("Can't initialize SSLContext for trustSelfSignedCerts", e);
+                }
             } else {
-                keystoreSslContext = null;
-                keystoreSessionStrategy = null;
+                customSslContext = null;
+                customSessionStrategy = null;
             }
 
             // Single consolidated HttpClientConfigCallback — prevents the old bug where
@@ -522,10 +550,10 @@ public class ElasticsearchIO {
                                         .setSoKeepAlive(true)
                                         .build());
 
-                                // Keystore-based SSL (takes priority over insecure SSL)
-                                if (keystoreSslContext != null) {
-                                    httpAsyncClientBuilder.setSSLContext(keystoreSslContext)
-                                        .setSSLStrategy(keystoreSessionStrategy);
+                                // Keystore-based or standalone self-signed SSL (takes priority over insecure SSL)
+                                if (customSslContext != null) {
+                                    httpAsyncClientBuilder.setSSLContext(customSslContext)
+                                        .setSSLStrategy(customSessionStrategy);
                                 } else if (isIgnoreInsecureSSL()) {
                                     // SECURITY WARNING: This disables ALL TLS certificate verification.
                                     // An attacker in network position can intercept all traffic including
@@ -554,12 +582,9 @@ public class ElasticsearchIO {
 
                                         httpAsyncClientBuilder.setSSLContext(context)
                                             .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
-                                    } catch (NoSuchAlgorithmException ex) {
+                                    } catch (NoSuchAlgorithmException | KeyManagementException ex) {
                                         logger.error("Error when setup dummy SSLContext", ex);
-                                    } catch (KeyManagementException ex) {
-                                        logger.error("Error when setup dummy SSLContext", ex);
-                                    } catch (Exception ex) {
-                                        logger.error("Error when setup dummy SSLContext", ex);
+                                        throw new IllegalStateException("Failed to initialize insecure SSLContext", ex);
                                     }
                                 }
 
