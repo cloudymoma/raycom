@@ -74,9 +74,9 @@ import java.util.zip.Deflater;
 import java.util.zip.GZIPOutputStream;
 import java.io.ByteArrayOutputStream;
 
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+import com.google.common.base.Strings;
 
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
