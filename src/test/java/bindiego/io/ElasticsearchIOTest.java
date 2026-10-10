@@ -1220,5 +1220,61 @@ public class ElasticsearchIOTest {
                 ElasticsearchIO.isRetryableHttpStatus(nonRetryable));
         }
     }
-}
 
+    // =========================================================================
+    // NDJSON Sanitization & Bulk Unit Construction Tests
+    // =========================================================================
+
+    @Test
+    public void trimTrailingNewlines_stripsTrailingCrAndLf() {
+        byte[] raw = "{\"a\":1}\r\n\n".getBytes(StandardCharsets.UTF_8);
+        int trimmedLen = ElasticsearchIO.trimTrailingNewlines(raw);
+        assertEquals("{\"a\":1}".length(), trimmedLen);
+    }
+
+    @Test
+    public void isBlankUtf8_detectsEmptyAndWhitespaceOnlyPayloads() {
+        byte[] empty = new byte[0];
+        assertTrue(ElasticsearchIO.isBlankUtf8(empty, 0));
+
+        byte[] spaces = "   \t\r\n ".getBytes(StandardCharsets.UTF_8);
+        assertTrue(ElasticsearchIO.isBlankUtf8(spaces, spaces.length));
+
+        byte[] validJson = "{\"a\":1}".getBytes(StandardCharsets.UTF_8);
+        assertFalse(ElasticsearchIO.isBlankUtf8(validJson, validJson.length));
+    }
+
+    @Test
+    public void buildBulkUnit_sanitizesEmbeddedNewlinesAndStripsTrailingNewlines() throws Exception {
+        String prettyDoc = "{\n  \"user\": \"alice\",\r\n  \"score\": 42\n}\r\n";
+        byte[] utf8 = prettyDoc.getBytes(StandardCharsets.UTF_8);
+        int docLen = ElasticsearchIO.trimTrailingNewlines(utf8);
+
+        byte[] unit = ElasticsearchIO.buildBulkUnit(prettyDoc, utf8, docLen, null);
+        String unitStr = new String(unit, StandardCharsets.UTF_8);
+
+        // Must be exactly two lines (action line + single-line source) ending with '\n'
+        String[] lines = unitStr.split("\n", -1);
+        assertEquals("NDJSON bulk unit must have action line, source line, and trailing empty after final \\n",
+            3, lines.length);
+        assertEquals("{\"index\":{}}", lines[0]);
+        assertFalse("Source line must not contain \\r", lines[1].contains("\r"));
+        assertEquals("", lines[2]);
+    }
+
+    @Test
+    public void buildBulkUnit_encodesDeterministicIdAndEscapesSpecialChars() throws Exception {
+        String doc = "{\"id\":\"quote\\\"and\\nnewline\",\"v\":1}";
+        byte[] utf8 = doc.getBytes(StandardCharsets.UTF_8);
+        int docLen = ElasticsearchIO.trimTrailingNewlines(utf8);
+
+        byte[] unit = ElasticsearchIO.buildBulkUnit(doc, utf8, docLen, d -> "quote\"and\nnewline");
+        String unitStr = new String(unit, StandardCharsets.UTF_8);
+
+        String[] lines = unitStr.split("\n", -1);
+        assertEquals(3, lines.length);
+        assertEquals("{\"index\":{\"_id\":\"quote\\\"and\\nnewline\"}}", lines[0]);
+        assertEquals(doc, lines[1]);
+        assertEquals("", lines[2]);
+    }
+}

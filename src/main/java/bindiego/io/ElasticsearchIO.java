@@ -124,6 +124,10 @@ public class ElasticsearchIO {
     // Pre-computed auto-id action line for bulk request building (used when no idFn
     // is configured — see Append.withIdFn for the deterministic-id variant)
     private static final byte[] INDEX_ACTION_BYTES = "{\"index\":{}}\n".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] INDEX_ID_ACTION_PREFIX_BYTES =
+        "{\"index\":{\"_id\":".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] INDEX_ID_ACTION_SUFFIX_BYTES =
+        "}}\n".getBytes(StandardCharsets.UTF_8);
 
     // _bulk bodies are newline-delimited JSON, not a single JSON document. ES 7/8
     // still accept application/json on _bulk as a backward-compatibility path, but
@@ -1027,37 +1031,85 @@ public class ElasticsearchIO {
             @ProcessElement
             public void processElement(ProcessContext context) throws Exception {
                 String doc = context.element();
+                if (doc == null) {
+                    totalErrors.increment();
+                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
+                    logger.error("Null document received in ElasticsearchIO.AppendFn — skipping.");
+                    return;
+                }
 
                 // Encode to UTF-8 once — stored as byte[] in the batch to avoid
                 // double encoding (was: encode here for size, encode again in buildBulkRequest)
                 byte[] docUtf8 = doc.getBytes(StandardCharsets.UTF_8);
 
-                // Guard against oversized documents that could cause OOM via memory amplification
+                // Strip trailing '\r' / '\n' and reject empty or whitespace-only documents.
+                // An empty source line in an NDJSON _bulk body causes Elasticsearch to
+                // reject the entire batch with HTTP 400.
+                int docLen = trimTrailingNewlines(docUtf8);
+                if (isBlankUtf8(docUtf8, docLen)) {
+                    totalErrors.increment();
+                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
+                    logger.error("Empty or whitespace-only document received in ElasticsearchIO.AppendFn — skipping.");
+                    return;
+                }
+
+                // Fast pre-check before invoking idFn / allocating the bulk unit buffer:
+                // guard against oversized documents that could cause OOM via memory amplification
                 // (byte[] in batch + bulk request buffer + optional gzip = up to 4x amplification)
-                if (docUtf8.length > spec.getMaxBatchSizeBytes()) {
+                if (docLen > spec.getMaxBatchSizeBytes()) {
                     totalErrors.increment();
                     // Counted in the Dataflow UI — an oversized drop must never be
                     // discoverable only by grepping worker logs.
                     METRIC_DOCS_DROPPED_OVERSIZED.inc();
                     logger.error("Document exceeds max batch size ({} bytes > {} bytes limit). Skipping.",
-                        docUtf8.length, spec.getMaxBatchSizeBytes());
+                        docLen, spec.getMaxBatchSizeBytes());
                     return;
                 }
 
-                byte[] unit = buildBulkUnit(doc, docUtf8);
+                byte[] unit = buildBulkUnit(doc, docUtf8, docLen, spec.getIdFn());
 
-                boolean flushNow;
+                // Full bulk-unit check including action metadata line overhead:
+                // currentBatchSizeBytes tracks unit.length, so a single unit must also fit
+                // within maxBatchSizeBytes.
+                if (unit.length > spec.getMaxBatchSizeBytes()) {
+                    totalErrors.increment();
+                    METRIC_DOCS_DROPPED_OVERSIZED.inc();
+                    logger.error("Bulk unit (action + document) exceeds max batch size ({} bytes > {} bytes limit). Skipping.",
+                        unit.length, spec.getMaxBatchSizeBytes());
+                    return;
+                }
+
+                // If adding this unit to a non-empty batch would push the batch over
+                // maxBatchSizeBytes, flush the existing batch FIRST so a single batch
+                // never overshoots maxBatchSizeBytes (up to 2x previously) and triggers
+                // HTTP 413 Payload Too Large from Elasticsearch.
+                boolean flushBeforeAdd = false;
+                boolean flushAfterAdd = false;
                 synchronized (batchLock) {
-                    batch.add(unit);
-                    currentBatchSizeBytes += unit.length;
-                    flushNow = shouldFlush();
+                    if (!batch.isEmpty()
+                            && currentBatchSizeBytes + unit.length > spec.getMaxBatchSizeBytes()) {
+                        flushBeforeAdd = true;
+                    } else {
+                        batch.add(unit);
+                        currentBatchSizeBytes += unit.length;
+                        flushAfterAdd = shouldFlush();
+                    }
                 }
 
                 // Flush OUTSIDE batchLock: flushBatchAsync() may block on the
                 // backpressure semaphore, and blocking while holding the monitor
                 // would freeze the time-based flusher and stall the whole DoFn on
                 // a single slow Elasticsearch request.
-                if (flushNow) {
+                if (flushBeforeAdd) {
+                    flushBatchAsync();
+                    synchronized (batchLock) {
+                        batch.add(unit);
+                        currentBatchSizeBytes += unit.length;
+                        flushAfterAdd = shouldFlush();
+                    }
+                }
+
+                if (flushAfterAdd) {
                     flushBatchAsync();
                 }
             }
@@ -1471,28 +1523,6 @@ public class ElasticsearchIO {
                 }
             }
 
-            /**
-             * Builds one complete NDJSON bulk entry: action line + source + newline.
-             * With an idFn configured, the action line carries a deterministic
-             * {@code _id} so HTTP-level resends and Beam bundle retries overwrite the
-             * same document instead of duplicating it under a fresh auto-id.
-             */
-            private byte[] buildBulkUnit(String doc, byte[] docUtf8) throws IOException {
-                SerializableFunction<String, String> idFn = spec.getIdFn();
-                String id = idFn != null ? idFn.apply(doc) : null;
-                byte[] actionBytes = id == null
-                    ? INDEX_ACTION_BYTES
-                    // writeValueAsString JSON-escapes and quotes the id
-                    : ("{\"index\":{\"_id\":" + mapper.writeValueAsString(id) + "}}\n")
-                        .getBytes(StandardCharsets.UTF_8);
-
-                byte[] unit = new byte[actionBytes.length + docUtf8.length + 1];
-                System.arraycopy(actionBytes, 0, unit, 0, actionBytes.length);
-                System.arraycopy(docUtf8, 0, unit, actionBytes.length, docUtf8.length);
-                unit[unit.length - 1] = '\n';
-                return unit;
-            }
-
             // Batch entries are complete pre-encoded bulk units — just concatenate
             private void buildBulkRequest(List<byte[]> docs, java.io.OutputStream out) throws IOException {
                 for (byte[] unit : docs) {
@@ -1762,6 +1792,82 @@ public class ElasticsearchIO {
         }
 
         return new BulkResult(successCount, retryable, nonRetryable);
+    }
+
+    /**
+     * Returns the length of {@code utf8} after stripping any trailing {@code '\r'}
+     * or {@code '\n'} bytes so appending the mandatory NDJSON delimiter {@code '\n'}
+     * never produces an empty blank line between bulk entries.
+     */
+    static int trimTrailingNewlines(byte[] utf8) {
+        int end = utf8.length;
+        while (end > 0 && (utf8[end - 1] == '\n' || utf8[end - 1] == '\r')) {
+            end--;
+        }
+        return end;
+    }
+
+    /**
+     * Returns {@code true} if {@code utf8[0..len)} contains only ASCII whitespace.
+     * For normal JSON documents starting with {@code '{'}, this returns {@code false}
+     * on the very first byte with zero allocations.
+     */
+    static boolean isBlankUtf8(byte[] utf8, int len) {
+        for (int i = 0; i < len; i++) {
+            byte b = utf8[i];
+            if (b != ' ' && b != '\t' && b != '\n' && b != '\r') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Builds one complete NDJSON bulk entry: {@code action_line + sanitized_source + '\n'}.
+     *
+     * <p>With an {@code idFn} configured, the action line carries a deterministic
+     * {@code _id} encoded directly to UTF-8 bytes via {@link ObjectMapper#writeValueAsBytes}
+     * (avoiding intermediate String allocations) so HTTP-level resends and Beam bundle
+     * retries overwrite the same document instead of duplicating it under a fresh auto-id.
+     *
+     * <p>Any embedded {@code '\r'} or {@code '\n'} bytes inside the document payload are
+     * replaced in place with ASCII space ({@code ' '}) so multi-line/pretty-printed JSON
+     * cannot split one document across multiple NDJSON lines and corrupt the entire
+     * {@code _bulk} request or shift positional item indices in {@link BulkResult}.
+     */
+    static byte[] buildBulkUnit(
+            String doc,
+            byte[] docUtf8,
+            int docLen,
+            @Nullable SerializableFunction<String, String> idFn) throws IOException {
+        String id = idFn != null ? idFn.apply(doc) : null;
+        final byte[] unit;
+        final int docStartOffset;
+
+        if (Strings.isNullOrEmpty(id)) {
+            docStartOffset = INDEX_ACTION_BYTES.length;
+            unit = new byte[docStartOffset + docLen + 1];
+            System.arraycopy(INDEX_ACTION_BYTES, 0, unit, 0, docStartOffset);
+        } else {
+            byte[] idJsonBytes = mapper.writeValueAsBytes(id);
+            int prefixLen = INDEX_ID_ACTION_PREFIX_BYTES.length;
+            int suffixLen = INDEX_ID_ACTION_SUFFIX_BYTES.length;
+            docStartOffset = prefixLen + idJsonBytes.length + suffixLen;
+            unit = new byte[docStartOffset + docLen + 1];
+            System.arraycopy(INDEX_ID_ACTION_PREFIX_BYTES, 0, unit, 0, prefixLen);
+            System.arraycopy(idJsonBytes, 0, unit, prefixLen, idJsonBytes.length);
+            System.arraycopy(INDEX_ID_ACTION_SUFFIX_BYTES, 0, unit, prefixLen + idJsonBytes.length, suffixLen);
+        }
+
+        System.arraycopy(docUtf8, 0, unit, docStartOffset, docLen);
+        for (int i = docStartOffset, limit = docStartOffset + docLen; i < limit; i++) {
+            byte b = unit[i];
+            if (b == '\n' || b == '\r') {
+                unit[i] = ' ';
+            }
+        }
+        unit[unit.length - 1] = '\n';
+        return unit;
     }
 
     /**
