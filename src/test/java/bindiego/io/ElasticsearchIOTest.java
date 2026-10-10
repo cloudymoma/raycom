@@ -1553,13 +1553,47 @@ public class ElasticsearchIOTest {
     }
 
     @Test
-    public void createClientBuilder_standaloneTrustSelfSignedCerts_succeedsWithoutKeystore() throws Exception {
-        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+    public void createClientBuilder_standaloneTrustSelfSignedCerts_configuresCustomSslOnHttpClient() throws Exception {
+        java.lang.reflect.Field callbackField =
+            org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
+        callbackField.setAccessible(true);
+
+        java.lang.reflect.Field sslContextField =
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslcontext");
+        sslContextField.setAccessible(true);
+        java.lang.reflect.Field sslStrategyField =
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslStrategy");
+        sslStrategyField.setAccessible(true);
+
+        // Baseline: without trustSelfSignedCerts, no custom SSLContext or SSLStrategy is installed
+        ElasticsearchIO.ConnectionConf defaultConf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withTrustSelfSignedCerts(false);
+        org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback defaultCallback =
+            (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                callbackField.get(defaultConf.createClientBuilder());
+        org.apache.http.impl.nio.client.HttpAsyncClientBuilder defaultHttpBuilder =
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+        defaultCallback.customizeHttpClient(defaultHttpBuilder);
+        assertNull("Default ConnectionConf must leave sslContext null",
+            sslContextField.get(defaultHttpBuilder));
+        assertNull("Default ConnectionConf must leave sslStrategy null",
+            sslStrategyField.get(defaultHttpBuilder));
+
+        // Standalone trustSelfSignedCerts (no keystorePath): must install custom SSLContext and SSLStrategy
+        ElasticsearchIO.ConnectionConf selfSignedConf = ElasticsearchIO.ConnectionConf
             .create("https://es.example.com:9200", "my-index")
             .withTrustSelfSignedCerts(true);
-
-        assertNotNull("createClientBuilder should succeed with standalone trustSelfSignedCerts",
-            conf.createClientBuilder());
+        org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback selfSignedCallback =
+            (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                callbackField.get(selfSignedConf.createClientBuilder());
+        org.apache.http.impl.nio.client.HttpAsyncClientBuilder selfSignedHttpBuilder =
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+        selfSignedCallback.customizeHttpClient(selfSignedHttpBuilder);
+        assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLContext",
+            sslContextField.get(selfSignedHttpBuilder));
+        assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLIOSessionStrategy",
+            sslStrategyField.get(selfSignedHttpBuilder));
     }
 
     @Test(expected = java.io.IOException.class)
