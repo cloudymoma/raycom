@@ -1174,4 +1174,51 @@ public class ElasticsearchIOTest {
         assertNotNull("Bundle 1 cell captured the late failure", bundle1Failure.get());
         assertNull("Bundle 2 failure cell must remain clean", bundle2Failure.get());
     }
+
+    // =========================================================================
+    // Bulk Response Validation & HTTP Retry Classification Tests
+    // =========================================================================
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_missingErrorsField_throwsIOException() throws Exception {
+        // Regression test: root.path("errors").asBoolean() returns false for MissingNode,
+        // which used to treat truncated or proxy-returned JSON without "errors" as 100% success.
+        String body = "{\"status\":503,\"message\":\"upstream proxy error\"}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 10);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_nonBooleanErrorsField_throwsIOException() throws Exception {
+        String body = "{\"errors\":\"true\",\"items\":[]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 10);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_errorsTrueWithoutItemsArray_throwsIOException() throws Exception {
+        String body = "{\"took\":5,\"errors\":true}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 10);
+    }
+
+    @Test
+    public void isRetryableHttpStatus_classifiesStatusCodesCorrectly() {
+        // Retryable HTTP statuses: 408 Request Timeout, 429 Too Many Requests, 500/502/503/504
+        for (int retryable : new int[]{408, 429, 500, 502, 503, 504}) {
+            assertTrue("HTTP " + retryable + " must be retryable",
+                ElasticsearchIO.isRetryableHttpStatus(retryable));
+        }
+
+        // Non-retryable HTTP client/server statuses: 400 Bad Request, 401 Unauthorized,
+        // 403 Forbidden, 404 Not Found, 409 Conflict, 413 Payload Too Large, 501 Not Implemented
+        for (int nonRetryable : new int[]{400, 401, 403, 404, 409, 413, 501}) {
+            assertFalse("HTTP " + nonRetryable + " must NOT be retryable",
+                ElasticsearchIO.isRetryableHttpStatus(nonRetryable));
+        }
+    }
 }
+

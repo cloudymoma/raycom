@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
+import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClientBuilder;
 import org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback;
 
@@ -1332,7 +1333,10 @@ public class ElasticsearchIO {
                     return;
                 }
                 RetryConf retryConf = spec.getRetryConf();
-                int maxRetries = retryConf != null ? retryConf.getMaxAttempts() : 1;
+                // maxAttempts is total attempts (1 initial + N-1 retries). Align retriesLeft
+                // with FluentBackoff's maxRetries (also maxAttempts - 1) so the remaining-retry
+                // count in logs and the backoff state machine stay in lockstep.
+                int maxRetries = retryConf != null ? retryConf.getMaxAttempts() - 1 : 0;
                 // ONE wall-clock retry budget shared by both retry layers (item-level
                 // partial-failure retries and HTTP-level request retries). Applying
                 // maxAttempts independently at each layer multiplied to maxAttempts²
@@ -1557,9 +1561,28 @@ public class ElasticsearchIO {
                         return result;
 
                     } catch (IOException | IllegalStateException e) {
-                        // HTTP-level failure — connection refused, timeout, stale client
+                        // HTTP-level failure — connection refused, timeout, stale client, or HTTP >= 300
                         attempt++;
                         totalErrors.increment();
+
+                        // RestClient throws ResponseException (extends IOException) on HTTP >= 300.
+                        // Fail fast on non-retryable client errors (400, 401, 403, 404, 413) instead
+                        // of burning maxAttempts retries and holding a backpressure permit on a
+                        // deterministic failure, and count HTTP-level 429 rejections in metrics.
+                        if (e instanceof ResponseException) {
+                            Response errResp = ((ResponseException) e).getResponse();
+                            int httpStatus = (errResp != null && errResp.getStatusLine() != null)
+                                ? errResp.getStatusLine().getStatusCode() : 0;
+                            if (httpStatus == 429) {
+                                asyncRejected429.add(docCount);
+                            }
+                            if (httpStatus > 0 && !isRetryableHttpStatus(httpStatus)) {
+                                logger.error("Non-retryable HTTP {} error from Elasticsearch on _bulk request",
+                                    httpStatus, e);
+                                throw new IOException(
+                                    "Non-retryable HTTP " + httpStatus + " error from Elasticsearch", e);
+                            }
+                        }
 
                         // Handle client state issues specifically
                         if (e instanceof IllegalStateException
@@ -1640,6 +1663,11 @@ public class ElasticsearchIO {
     private static final Set<Integer> RETRYABLE_STATUS_CODES =
         new HashSet<>(Arrays.asList(429, 500, 502, 503, 504));
 
+    /** Returns true if an HTTP-level response status is transient and safe to retry. */
+    static boolean isRetryableHttpStatus(int statusCode) {
+        return statusCode == 408 || RETRYABLE_STATUS_CODES.contains(statusCode);
+    }
+
     /**
      * Parses a bulk API response into a structured {@link BulkResult} with per-item
      * success/failure classification. This method does NOT throw on per-item
@@ -1661,12 +1689,23 @@ public class ElasticsearchIO {
     static BulkResult parseBulkResponse(HttpEntity responseEntity, int esVersion,
             boolean partialUpdate, int expectedItemCount) throws IOException {
         JsonNode searchResult = parseResponse(responseEntity);
+        JsonNode errorsNode = searchResult != null ? searchResult.get("errors") : null;
+        if (errorsNode == null || !errorsNode.isBoolean()) {
+            throw new IOException(
+                "Malformed Elasticsearch bulk response: missing boolean 'errors' field: " + searchResult);
+        }
         JsonNode items = searchResult.path("items");
 
         // Fast path: no errors at all
-        if (!searchResult.path("errors").asBoolean()) {
+        if (!errorsNode.booleanValue()) {
             return new BulkResult(expectedItemCount >= 0 ? expectedItemCount : items.size(),
                 new ArrayList<>(0), new ArrayList<>(0));
+        }
+
+        if (!items.isArray()) {
+            throw new IOException(
+                "Malformed Elasticsearch bulk response: 'errors' is true but 'items' is missing or not an array: "
+                + searchResult);
         }
 
         // Slow path: classify each failed item
