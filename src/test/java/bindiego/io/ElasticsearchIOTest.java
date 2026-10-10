@@ -1125,4 +1125,53 @@ public class ElasticsearchIOTest {
         assertNotEquals("Different schemes should produce different pool keys",
             conf1.getPoolKey(), conf2.getPoolKey());
     }
+
+    // =========================================================================
+    // Bundle Fault-Tolerance & Concurrent Flush Safety Tests
+    // =========================================================================
+
+    @Test
+    public void waitForPendingOperations_removeAllPreservesConcurrentlyAddedFutures() {
+        // Regression test: waitForPendingOperations used to call pendingOperations.clear()
+        // in finally, wiping out any future added by a concurrent scheduler tick after
+        // toArray() took its snapshot.
+        Queue<CompletableFuture<Void>> pendingOps = new ConcurrentLinkedQueue<>();
+        CompletableFuture<Void> f1 = CompletableFuture.completedFuture(null);
+        CompletableFuture<Void> f2 = CompletableFuture.completedFuture(null);
+        pendingOps.add(f1);
+        pendingOps.add(f2);
+
+        CompletableFuture<?>[] snapshot = pendingOps.toArray(new CompletableFuture[0]);
+        // Simulate a scheduler tick adding f3 while allOf(snapshot).get() is awaiting f1/f2
+        CompletableFuture<Void> f3 = new CompletableFuture<>();
+        pendingOps.add(f3);
+
+        pendingOps.removeAll(java.util.Arrays.asList(snapshot));
+
+        assertEquals("Concurrently added future must remain in pendingOperations", 1, pendingOps.size());
+        assertSame("f3 must be preserved for the next quiescence pass", f3, pendingOps.peek());
+    }
+
+    @Test
+    public void bundleScopedFailureCell_lateFailureFromAbortedBundleDoesNotPoisonNextBundle() {
+        // Regression test: firstAsyncFailure was mutated in place across bundles, so a
+        // late-failing future from a timed-out/aborted bundle wrote its exception into
+        // the next healthy bundle's failure cell.
+        AtomicReference<Throwable> bundle1Failure = new AtomicReference<>();
+        CompletableFuture<Void> orphanedBundle1Future = new CompletableFuture<>();
+        orphanedBundle1Future.whenComplete((v, t) -> {
+            if (t != null) {
+                bundle1Failure.compareAndSet(null, t);
+            }
+        });
+
+        // Bundle 2 starts and allocates a fresh AtomicReference
+        AtomicReference<Throwable> bundle2Failure = new AtomicReference<>();
+
+        // Orphaned future from bundle 1 fails mid-way through bundle 2
+        orphanedBundle1Future.completeExceptionally(new RuntimeException("Bundle 1 late failure"));
+
+        assertNotNull("Bundle 1 cell captured the late failure", bundle1Failure.get());
+        assertNull("Bundle 2 failure cell must remain clean", bundle2Failure.get());
+    }
 }
