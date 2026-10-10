@@ -888,19 +888,19 @@ public class ElasticsearchIO {
             private transient volatile RestClient restClient;
 
             // transient lock — ReentrantLock is not Serializable
-            private transient Object batchLock;
+            transient Object batchLock;
             // Each entry is one complete pre-encoded NDJSON bulk unit
             // (action line + source + trailing newline)
-            private transient List<byte[]> batch;
-            private transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
-            private volatile long lastFlushTime;
+            transient List<byte[]> batch;
+            transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
+            volatile long lastFlushTime;
 
             // Connection pooling
             private transient String poolKey;
             private transient String poolKeyForLog; // redacted version for logging
 
             // Performance optimization: reuse byte buffers (exposed subclass avoids toByteArray copy)
-            private transient ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool;
+            transient ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool;
 
             // Shared (per pool key, reference-counted) scheduler for time-based flushing
             private transient ScheduledExecutorService scheduler;
@@ -909,24 +909,24 @@ public class ElasticsearchIO {
             private transient ScheduledFuture<?> flushTask;
 
             // Shared IO executor — avoids starving ForkJoinPool.commonPool() with blocking HTTP calls
-            private transient ExecutorService ioExecutor;
+            transient ExecutorService ioExecutor;
 
             // Shared backpressure: bounds in-flight ES requests per worker, not per instance
-            private transient Semaphore concurrencySemaphore;
+            transient Semaphore concurrencySemaphore;
 
             // transient ConcurrentLinkedQueue — lock-free, no serialization issue
-            private transient Queue<CompletableFuture<Void>> pendingOperations;
+            transient Queue<CompletableFuture<Void>> pendingOperations;
 
             // Count of flushes that have swapped the batch out but not yet registered
             // their future in pendingOperations (or restored the batch). FinishBundle
             // must not snapshot pendingOperations while this is non-zero, or it can
             // commit the bundle past work that is in flight but untracked.
-            private transient AtomicInteger unregisteredFlushes;
+            transient AtomicInteger unregisteredFlushes;
 
             // First failure from a self-removed future (see flushBatch): completed
             // futures leave pendingOperations eagerly, so their errors must be
             // captured separately for FinishBundle to propagate.
-            private transient AtomicReference<Throwable> firstAsyncFailure;
+            transient AtomicReference<Throwable> firstAsyncFailure;
 
             // IO threads have no Beam metrics container, so async completions
             // accumulate here and are drained into the Beam counters on the bundle
@@ -1181,7 +1181,7 @@ public class ElasticsearchIO {
             }
 
             // Propagate errors instead of silently dropping data
-            private void waitForPendingOperations() throws IOException, InterruptedException {
+            void waitForPendingOperations() throws IOException, InterruptedException {
                 long timeoutSecs = spec.getPendingTimeoutSeconds();
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSecs);
 
@@ -1211,13 +1211,11 @@ public class ElasticsearchIO {
                         CompletableFuture.allOf(futures).get(remainingNanos, TimeUnit.NANOSECONDS);
                         logger.debug("All {} pending operations completed successfully", futures.length);
                     } catch (TimeoutException e) {
-                        bundleFailure.set(null);
                         totalErrors.increment();
                         throw new IOException(
                             "Elasticsearch operations timed out after " + timeoutSecs + "s — potential data loss for "
                             + futures.length + " pending batches", e);
                     } catch (ExecutionException e) {
-                        bundleFailure.set(null);
                         totalErrors.increment();
                         throw new IOException("Elasticsearch batch operation failed", e.getCause());
                     } finally {
@@ -1251,8 +1249,12 @@ public class ElasticsearchIO {
                 }
                 scheduler = null;
                 ioExecutor = null;
-                concurrencySemaphore = null;
-                byteBufferPool = null;
+                // Deliberately do NOT null out concurrencySemaphore or byteBufferPool:
+                // if a bundle aborted/timed out while one of its batch jobs was still
+                // queued or running on the shared ioExecutor, nulling these fields causes
+                // byteBufferPool.get() to throw NPE and concurrencySemaphore.release() in
+                // the job's finally block to throw NPE — permanently leaking a permit
+                // from the worker-wide shared semaphore.
 
                 // Don't close pooled clients - they're shared
                 if (pendingOperations != null) {
@@ -1266,6 +1268,57 @@ public class ElasticsearchIO {
             }
 
             /**
+             * Immutable snapshot of the batch and bundle-scoped tracking cells
+             * captured atomically under {@code batchLock} when a flush swaps out
+             * the active batch.
+             */
+            private static final class SwappedBatch {
+                final List<byte[]> docs;
+                final long sizeBytes;
+                final Queue<CompletableFuture<Void>> bundleOps;
+                final AtomicReference<Throwable> bundleFailure;
+
+                SwappedBatch(
+                        List<byte[]> docs,
+                        long sizeBytes,
+                        Queue<CompletableFuture<Void>> bundleOps,
+                        AtomicReference<Throwable> bundleFailure) {
+                    this.docs = docs;
+                    this.sizeBytes = sizeBytes;
+                    this.bundleOps = bundleOps;
+                    this.bundleFailure = bundleFailure;
+                }
+            }
+
+            /**
+             * Atomically swaps out the current non-empty batch under {@code batchLock},
+             * captures the current bundle's tracking structures, and increments
+             * {@code unregisteredFlushes}. Returns {@code null} if the batch is empty.
+             */
+            private SwappedBatch swapBatchUnderLock() {
+                synchronized (batchLock) {
+                    if (batch == null || batch.isEmpty()) {
+                        return null;
+                    }
+                    // Swap batch reference (O(1)) instead of copying (O(n))
+                    List<byte[]> currentBatch = batch;
+                    long batchBytes = currentBatchSizeBytes;
+
+                    // Allocate fresh batch for next accumulation
+                    int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
+                    batch = new ArrayList<byte[]>(estimatedCapacity);
+                    currentBatchSizeBytes = 0;
+                    lastFlushTime = System.currentTimeMillis();
+
+                    // From this point until the future is in pendingOperations (or the
+                    // batch is restored), the documents are invisible to FinishBundle.
+                    unregisteredFlushes.incrementAndGet();
+                    return new SwappedBatch(
+                        currentBatch, batchBytes, pendingOperations, firstAsyncFailure);
+                }
+            }
+
+            /**
              * Swaps out the accumulated batch and hands it to the IO executor.
              *
              * @param mayBlock if true (element/bundle threads) block for a backpressure
@@ -1273,12 +1326,16 @@ public class ElasticsearchIO {
              *     swapping the batch so the timer thread is never parked and never resets
              *     {@code lastFlushTime} or triggers {@code restoreBatch} on contention.
              */
-            private void flushBatch(boolean mayBlock) {
-                List<byte[]> currentBatch;
-                long batchBytes;
-                final Queue<CompletableFuture<Void>> bundleOps;
-                final AtomicReference<Throwable> bundleFailure;
+            void flushBatch(boolean mayBlock) {
+                // Capture local references so a concurrent @Teardown cannot cause NPE
+                // when releasing the semaphore permit in the async task's finally block.
+                final Semaphore sem = concurrencySemaphore;
+                final ExecutorService executor = ioExecutor;
+                if (sem == null || executor == null) {
+                    return;
+                }
 
+                final SwappedBatch swapped;
                 if (!mayBlock) {
                     synchronized (batchLock) {
                         if (batch == null || batch.isEmpty()) {
@@ -1288,64 +1345,42 @@ public class ElasticsearchIO {
                     // Acquire permit BEFORE swapping the batch out: on contention we
                     // leave the batch untouched and preserve lastFlushTime so the next
                     // tick (or element) flushes as soon as a permit frees up.
-                    if (!concurrencySemaphore.tryAcquire()) {
+                    if (!sem.tryAcquire()) {
                         return;
                     }
-                    synchronized (batchLock) {
-                        if (batch == null || batch.isEmpty()) {
-                            concurrencySemaphore.release();
-                            return;
-                        }
-                        currentBatch = batch;
-                        batchBytes = currentBatchSizeBytes;
-                        int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
-                        batch = new ArrayList<byte[]>(estimatedCapacity);
-                        currentBatchSizeBytes = 0;
-                        lastFlushTime = System.currentTimeMillis();
-                        bundleOps = pendingOperations;
-                        bundleFailure = firstAsyncFailure;
-                        unregisteredFlushes.incrementAndGet();
+                    swapped = swapBatchUnderLock();
+                    if (swapped == null) {
+                        sem.release();
+                        return;
                     }
                 } else {
-                    synchronized (batchLock) {
-                        if (batch == null || batch.isEmpty()) {
-                            return;
-                        }
-
-                        // Swap batch reference (O(1)) instead of copying (O(n))
-                        currentBatch = batch;
-                        batchBytes = currentBatchSizeBytes;
-
-                        // Allocate fresh batch for next accumulation
-                        int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
-                        batch = new ArrayList<byte[]>(estimatedCapacity);
-                        currentBatchSizeBytes = 0;
-                        lastFlushTime = System.currentTimeMillis();
-                        bundleOps = pendingOperations;
-                        bundleFailure = firstAsyncFailure;
-
-                        // From this point until the future is in pendingOperations (or the
-                        // batch is restored), the documents are invisible to FinishBundle.
-                        unregisteredFlushes.incrementAndGet();
+                    swapped = swapBatchUnderLock();
+                    if (swapped == null) {
+                        return;
                     }
 
                     try {
-                        concurrencySemaphore.acquire();
+                        sem.acquire();
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         // The swapped-out batch is the only reference to these documents.
                         // Restore it and fail loud — returning silently here would let the
                         // bundle commit (and Pub/Sub ack) without the data ever being sent.
                         try {
-                            restoreBatch(currentBatch, batchBytes);
+                            restoreBatch(swapped.docs, swapped.sizeBytes);
                         } finally {
                             unregisteredFlushes.decrementAndGet();
                         }
                         throw new RuntimeException(
                             "Interrupted while waiting for Elasticsearch backpressure permit; "
-                            + currentBatch.size() + " documents restored to the pending batch", e);
+                            + swapped.docs.size() + " documents restored to the pending batch", e);
                     }
                 }
+
+                final List<byte[]> currentBatch = swapped.docs;
+                final long batchBytes = swapped.sizeBytes;
+                final Queue<CompletableFuture<Void>> bundleOps = swapped.bundleOps;
+                final AtomicReference<Throwable> bundleFailure = swapped.bundleFailure;
 
                 try {
                     // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
@@ -1359,9 +1394,9 @@ public class ElasticsearchIO {
                                 totalErrors.increment();
                                 throw new RuntimeException("Batch processing failed", e);
                             } finally {
-                                concurrencySemaphore.release();
+                                sem.release();
                             }
-                        }, ioExecutor);
+                        }, executor);
                         submitted = true;
                         bundleOps.add(future);
                         // Self-remove on completion so the queue stays bounded by the
@@ -1380,7 +1415,7 @@ public class ElasticsearchIO {
                         // executor was shut down — the task body never runs, so the permit
                         // acquired above would leak and the batch would vanish untracked.
                         if (!submitted) {
-                            concurrencySemaphore.release();
+                            sem.release();
                             restoreBatch(currentBatch, batchBytes);
                         }
                     }

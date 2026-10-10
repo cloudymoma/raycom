@@ -1131,48 +1131,141 @@ public class ElasticsearchIOTest {
     // =========================================================================
 
     @Test
-    public void waitForPendingOperations_removeAllPreservesConcurrentlyAddedFutures() {
-        // Regression test: waitForPendingOperations used to call pendingOperations.clear()
-        // in finally, wiping out any future added by a concurrent scheduler tick after
-        // toArray() took its snapshot.
-        Queue<CompletableFuture<Void>> pendingOps = new ConcurrentLinkedQueue<>();
-        CompletableFuture<Void> f1 = CompletableFuture.completedFuture(null);
-        CompletableFuture<Void> f2 = CompletableFuture.completedFuture(null);
-        pendingOps.add(f1);
-        pendingOps.add(f2);
+    public void waitForPendingOperations_removeAllPreservesConcurrentlyAddedFutures() throws Exception {
+        // Exercises AppendFn.waitForPendingOperations() directly: while allOf(futures).get()
+        // is blocked awaiting f1, a concurrent thread registers f2 in pendingOperations and
+        // then completes f1. waitForPendingOperations() must remove only f1 and preserve f2.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        fn.batchLock = new Object();
+        fn.unregisteredFlushes = new AtomicInteger(0);
+        fn.startBundle(null);
 
-        CompletableFuture<?>[] snapshot = pendingOps.toArray(new CompletableFuture[0]);
-        // Simulate a scheduler tick adding f3 while allOf(snapshot).get() is awaiting f1/f2
-        CompletableFuture<Void> f3 = new CompletableFuture<>();
-        pendingOps.add(f3);
+        CompletableFuture<Void> f1 = new CompletableFuture<>();
+        CompletableFuture<Void> f2 = new CompletableFuture<>();
+        fn.pendingOperations.add(f1);
 
-        pendingOps.removeAll(java.util.Arrays.asList(snapshot));
+        Thread concurrentTick = new Thread(() -> {
+            try {
+                Thread.sleep(30);
+                fn.pendingOperations.add(f2);
+                f1.complete(null);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        concurrentTick.start();
 
-        assertEquals("Concurrently added future must remain in pendingOperations", 1, pendingOps.size());
-        assertSame("f3 must be preserved for the next quiescence pass", f3, pendingOps.peek());
+        fn.waitForPendingOperations();
+        concurrentTick.join(5000);
+
+        assertEquals("Concurrently added future f2 must remain in fn.pendingOperations",
+            1, fn.pendingOperations.size());
+        assertSame("f2 must be preserved for the next quiescence pass",
+            f2, fn.pendingOperations.peek());
     }
 
     @Test
-    public void bundleScopedFailureCell_lateFailureFromAbortedBundleDoesNotPoisonNextBundle() {
-        // Regression test: firstAsyncFailure was mutated in place across bundles, so a
-        // late-failing future from a timed-out/aborted bundle wrote its exception into
-        // the next healthy bundle's failure cell.
-        AtomicReference<Throwable> bundle1Failure = new AtomicReference<>();
-        CompletableFuture<Void> orphanedBundle1Future = new CompletableFuture<>();
-        orphanedBundle1Future.whenComplete((v, t) -> {
-            if (t != null) {
-                bundle1Failure.compareAndSet(null, t);
+    public void bundleScopedFailureCell_lateFailureFromAbortedBundleDoesNotPoisonNextBundle() throws Exception {
+        // Exercises AppendFn.startBundle() and AppendFn.waitForPendingOperations() directly:
+        // Bundle 1 flushes a batch whose future fails AFTER Bundle 2's startBundle() has run.
+        // Bundle 2's waitForPendingOperations() must not throw because startBundle() allocated
+        // fresh pendingOperations and firstAsyncFailure instances for Bundle 2.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        fn.batchLock = new Object();
+        fn.unregisteredFlushes = new AtomicInteger(0);
+        fn.byteBufferPool = ThreadLocal.withInitial(() -> new ElasticsearchIO.ExposedByteArrayOutputStream(8192));
+        fn.concurrencySemaphore = new Semaphore(2);
+
+        CountDownLatch allowBundle1TaskToFail = new CountDownLatch(1);
+        ExecutorService testExecutor = Executors.newSingleThreadExecutor();
+        try {
+            fn.ioExecutor = testExecutor;
+
+            // Bundle 1 starts and flushes a non-empty batch
+            fn.startBundle(null);
+            AtomicReference<Throwable> bundle1FailureRef = fn.firstAsyncFailure;
+            fn.batch.add("{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
+            fn.currentBatchSizeBytes = 22;
+
+            // Occupy the single executor thread until Bundle 2 has started
+            testExecutor.submit(() -> {
+                try {
+                    allowBundle1TaskToFail.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            fn.flushBatch(true);
+
+            // Simulate Bundle 1 aborting and Bundle 2 starting on the same DoFn instance
+            fn.startBundle(null);
+            assertNotSame("startBundle must allocate a fresh firstAsyncFailure cell per bundle",
+                bundle1FailureRef, fn.firstAsyncFailure);
+
+            // Now let Bundle 1's queued flush task run and fail (restClient is null -> NPE in processBatch)
+            allowBundle1TaskToFail.countDown();
+            long deadline = System.currentTimeMillis() + 5000;
+            while (bundle1FailureRef.get() == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10);
             }
-        });
+            assertNotNull("Bundle 1's failure cell must capture the late failure", bundle1FailureRef.get());
 
-        // Bundle 2 starts and allocates a fresh AtomicReference
-        AtomicReference<Throwable> bundle2Failure = new AtomicReference<>();
+            // Bundle 2's waitForPendingOperations() must succeed cleanly without seeing Bundle 1's error
+            fn.waitForPendingOperations();
+        } finally {
+            testExecutor.shutdownNow();
+        }
+    }
 
-        // Orphaned future from bundle 1 fails mid-way through bundle 2
-        orphanedBundle1Future.completeExceptionally(new RuntimeException("Bundle 1 late failure"));
+    @Test
+    public void closeClient_whileBatchInFlight_doesNotLeakSemaphorePermit() throws Exception {
+        // Exercises AppendFn.flushBatch() + AppendFn.closeClient() (@Teardown):
+        // If @Teardown runs while an aborted bundle's batch task is still queued on the
+        // shared ioExecutor, the task must still release its permit back to the shared
+        // semaphore and must not NPE on byteBufferPool or concurrencySemaphore.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        fn.batchLock = new Object();
+        fn.unregisteredFlushes = new AtomicInteger(0);
+        fn.byteBufferPool = ThreadLocal.withInitial(() -> new ElasticsearchIO.ExposedByteArrayOutputStream(8192));
 
-        assertNotNull("Bundle 1 cell captured the late failure", bundle1Failure.get());
-        assertNull("Bundle 2 failure cell must remain clean", bundle2Failure.get());
+        Semaphore sharedSemaphore = new Semaphore(1);
+        ExecutorService sharedExecutor = Executors.newSingleThreadExecutor();
+        CountDownLatch releaseExecutor = new CountDownLatch(1);
+        try {
+            fn.concurrencySemaphore = sharedSemaphore;
+            fn.ioExecutor = sharedExecutor;
+            fn.startBundle(null);
+
+            // Hold the executor thread so the flushed batch stays queued during @Teardown
+            sharedExecutor.submit(() -> {
+                try {
+                    releaseExecutor.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            fn.batch.add("{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
+            fn.currentBatchSizeBytes = 22;
+            fn.flushBatch(true);
+            assertEquals("Permit must be held while batch is queued", 0, sharedSemaphore.availablePermits());
+
+            // @Teardown runs while the batch job is still queued on sharedExecutor
+            fn.closeClient();
+            assertNotNull("byteBufferPool must not be nulled by closeClient", fn.byteBufferPool);
+
+            // Unblock the queued batch job; it will fail inside processBatch (restClient == null)
+            // and must release its semaphore permit in finally.
+            releaseExecutor.countDown();
+            assertTrue("Shared semaphore permit must be released after in-flight job finishes",
+                sharedSemaphore.tryAcquire(5, TimeUnit.SECONDS));
+            sharedSemaphore.release();
+        } finally {
+            sharedExecutor.shutdownNow();
+        }
     }
 
     // =========================================================================
