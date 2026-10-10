@@ -1078,6 +1078,17 @@ public class ElasticsearchIO {
                     return;
                 }
 
+                // Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between
+                // tokens (outside string literals). A raw CR/LF inside a string literal is
+                // invalid JSON that Elasticsearch rejects with mapper_parsing_exception;
+                // rewriting it to a space would silently alter the stored value.
+                if (hasUnescapedNewlineInJsonString(docUtf8, docLen)) {
+                    totalErrors.increment();
+                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
+                    logger.error("Document contains unescaped CR/LF inside a JSON string literal — skipping.");
+                    return;
+                }
+
                 // Fast pre-check before invoking idFn / allocating the bulk unit buffer:
                 // guard against oversized documents that could cause OOM via memory amplification
                 // (byte[] in batch + bulk request buffer + optional gzip = up to 4x amplification)
@@ -1091,7 +1102,16 @@ public class ElasticsearchIO {
                     return;
                 }
 
-                byte[] unit = buildBulkUnit(doc, docUtf8, docLen, spec.getIdFn());
+                SerializableFunction<String, String> idFn = spec.getIdFn();
+                String id = idFn != null ? idFn.apply(doc) : null;
+                if (id != null && id.isEmpty()) {
+                    totalErrors.increment();
+                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
+                    logger.error("idFn returned an empty _id in ElasticsearchIO.AppendFn — skipping.");
+                    return;
+                }
+
+                byte[] unit = buildBulkUnitWithResolvedId(id, docUtf8, docLen);
 
                 // Full bulk-unit check including action metadata line overhead:
                 // currentBatchSizeBytes tracks unit.length, so a single unit must also fit
@@ -1889,6 +1909,37 @@ public class ElasticsearchIO {
     }
 
     /**
+     * Returns {@code true} if {@code utf8[0..len)} contains a raw unescaped
+     * {@code '\r'} or {@code '\n'} inside a JSON string literal.
+     *
+     * <p>Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between
+     * tokens (outside string literals). A raw CR/LF inside a string literal is
+     * invalid JSON that Elasticsearch rejects with {@code mapper_parsing_exception};
+     * rewriting it to {@code ' '} would silently mutate the stored string value.
+     */
+    static boolean hasUnescapedNewlineInJsonString(byte[] utf8, int len) {
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = 0; i < len; i++) {
+            byte b = utf8[i];
+            if (!inString) {
+                if (b == '"') {
+                    inString = true;
+                }
+            } else if (escaped) {
+                escaped = false;
+            } else if (b == '\\') {
+                escaped = true;
+            } else if (b == '"') {
+                inString = false;
+            } else if (b == '\n' || b == '\r') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Builds one complete NDJSON bulk entry: {@code action_line + sanitized_source + '\n'}.
      *
      * <p>With an {@code idFn} configured, the action line carries a deterministic
@@ -1896,10 +1947,9 @@ public class ElasticsearchIO {
      * (avoiding intermediate String allocations) so HTTP-level resends and Beam bundle
      * retries overwrite the same document instead of duplicating it under a fresh auto-id.
      *
-     * <p>Any embedded {@code '\r'} or {@code '\n'} bytes inside the document payload are
-     * replaced in place with ASCII space ({@code ' '}) so multi-line/pretty-printed JSON
-     * cannot split one document across multiple NDJSON lines and corrupt the entire
-     * {@code _bulk} request or shift positional item indices in {@link BulkResult}.
+     * <p>Any inter-token {@code '\r'} or {@code '\n'} whitespace outside JSON string literals
+     * is replaced in place with ASCII space ({@code ' '}) so pretty-printed JSON is compacted
+     * onto a single NDJSON line without mutating string values.
      */
     static byte[] buildBulkUnit(
             String doc,
@@ -1907,10 +1957,17 @@ public class ElasticsearchIO {
             int docLen,
             @Nullable SerializableFunction<String, String> idFn) throws IOException {
         String id = idFn != null ? idFn.apply(doc) : null;
+        return buildBulkUnitWithResolvedId(id, docUtf8, docLen);
+    }
+
+    static byte[] buildBulkUnitWithResolvedId(
+            @Nullable String id,
+            byte[] docUtf8,
+            int docLen) throws IOException {
         final byte[] unit;
         final int docStartOffset;
 
-        if (Strings.isNullOrEmpty(id)) {
+        if (id == null) {
             docStartOffset = INDEX_ACTION_BYTES.length;
             unit = new byte[docStartOffset + docLen + 1];
             System.arraycopy(INDEX_ACTION_BYTES, 0, unit, 0, docStartOffset);
@@ -1926,10 +1983,25 @@ public class ElasticsearchIO {
         }
 
         System.arraycopy(docUtf8, 0, unit, docStartOffset, docLen);
+        boolean inString = false;
+        boolean escaped = false;
         for (int i = docStartOffset, limit = docStartOffset + docLen; i < limit; i++) {
             byte b = unit[i];
-            if (b == '\n' || b == '\r') {
-                unit[i] = ' ';
+            if (!inString) {
+                if (b == '"') {
+                    inString = true;
+                } else if (b == '\n' || b == '\r') {
+                    unit[i] = ' ';
+                }
+            } else if (escaped) {
+                escaped = false;
+            } else if (b == '\\') {
+                escaped = true;
+            } else if (b == '"') {
+                inString = false;
+            } else if (b == '\n' || b == '\r') {
+                throw new IllegalArgumentException(
+                    "Document contains unescaped CR/LF inside a JSON string literal");
             }
         }
         unit[unit.length - 1] = '\n';

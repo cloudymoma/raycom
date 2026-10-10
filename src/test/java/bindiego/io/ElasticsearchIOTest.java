@@ -1473,6 +1473,38 @@ public class ElasticsearchIOTest {
         assertEquals("", lines[2]);
     }
 
+    @Test
+    public void hasUnescapedNewlineInJsonString_distinguishesInterTokenFromStringLiteralNewlines() {
+        // Pretty-printed JSON with raw newlines outside strings and escaped \n inside a string is valid
+        byte[] validPretty = "{\n  \"msg\": \"line1\\nline2\",\r\n  \"n\": 1\n}".getBytes(StandardCharsets.UTF_8);
+        assertFalse(ElasticsearchIO.hasUnescapedNewlineInJsonString(validPretty, validPretty.length));
+
+        // Raw LF or CR inside a JSON string literal is invalid JSON and must be flagged
+        byte[] rawLfInString = "{\"msg\": \"line1\nline2\"}".getBytes(StandardCharsets.UTF_8);
+        assertTrue(ElasticsearchIO.hasUnescapedNewlineInJsonString(rawLfInString, rawLfInString.length));
+
+        byte[] rawCrInString = "{\"msg\": \"line1\rline2\"}".getBytes(StandardCharsets.UTF_8);
+        assertTrue(ElasticsearchIO.hasUnescapedNewlineInJsonString(rawCrInString, rawCrInString.length));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void buildBulkUnit_rawNewlineInsideJsonString_throwsInsteadOfMutatingValue() throws Exception {
+        String invalidJson = "{\"msg\":\"hello\nworld\"}";
+        byte[] utf8 = invalidJson.getBytes(StandardCharsets.UTF_8);
+        ElasticsearchIO.buildBulkUnit(invalidJson, utf8, utf8.length, null);
+    }
+
+    @Test
+    public void buildBulkUnit_emptyId_doesNotSilentlyFallBackToAutoId() throws Exception {
+        String doc = "{\"a\":1}";
+        byte[] utf8 = doc.getBytes(StandardCharsets.UTF_8);
+        byte[] unit = ElasticsearchIO.buildBulkUnit(doc, utf8, utf8.length, d -> "");
+        String unitStr = new String(unit, StandardCharsets.UTF_8);
+
+        assertTrue("Empty id must not silently become auto-id {\"index\":{}}",
+            unitStr.startsWith("{\"index\":{\"_id\":\"\"}}\n"));
+    }
+
     // =========================================================================
     // ConnectionConf SSL, Keystore Builders, and Complete PoolKey Tests
     // =========================================================================
