@@ -1314,6 +1314,108 @@ public class ElasticsearchIOTest {
         }
     }
 
+    @Test
+    public void executeWithRetry_malformed2xxBulkResponse_doesNotResendBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append()
+            .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
+            .withRetryConf(ElasticsearchIO.RetryConf.create(3, org.joda.time.Duration.standardMinutes(1)));
+        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        fn.retryBackoff = org.apache.beam.sdk.util.FluentBackoff.DEFAULT
+            .withInitialBackoff(org.joda.time.Duration.millis(1))
+            .withMaxRetries(2);
+        fn.asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
+        fn.asyncRejected429 = new java.util.concurrent.atomic.LongAdder();
+
+        org.elasticsearch.client.RestClient mockClient =
+            org.mockito.Mockito.mock(org.elasticsearch.client.RestClient.class);
+        org.elasticsearch.client.Response mockResponse =
+            org.mockito.Mockito.mock(org.elasticsearch.client.Response.class);
+        String malformedBody = "{\"status\":503,\"message\":\"missing errors field\"}";
+        HttpEntity entity = new ByteArrayEntity(
+            malformedBody.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
+        org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
+            .thenReturn(mockResponse);
+        org.mockito.Mockito.when(mockResponse.getEntity()).thenReturn(entity);
+        fn.restClient = mockClient;
+
+        byte[] reqBytes = "{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8);
+        try {
+            fn.executeWithRetry(reqBytes, reqBytes.length, 1, reqBytes.length, false,
+                System.currentTimeMillis() + 60_000L);
+            fail("Expected IOException for malformed 2xx bulk response");
+        } catch (java.io.IOException expected) {
+            // expected
+        }
+
+        // Must NOT resend the batch when performRequest already returned a 2xx response
+        org.mockito.Mockito.verify(mockClient, org.mockito.Mockito.times(1))
+            .performRequest(org.mockito.Mockito.any());
+    }
+
+    @Test
+    public void executeWithRetry_http429Retries_onlyCountsWhenRetriesExhausted() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append()
+            .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
+            .withRetryConf(ElasticsearchIO.RetryConf.create(3, org.joda.time.Duration.standardMinutes(1)));
+        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        fn.retryBackoff = org.apache.beam.sdk.util.FluentBackoff.DEFAULT
+            .withInitialBackoff(org.joda.time.Duration.millis(1))
+            .withMaxRetries(2);
+        fn.asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
+        fn.asyncRejected429 = new java.util.concurrent.atomic.LongAdder();
+
+        org.elasticsearch.client.RestClient mockClient =
+            org.mockito.Mockito.mock(org.elasticsearch.client.RestClient.class);
+        org.elasticsearch.client.Response err429Response =
+            org.mockito.Mockito.mock(org.elasticsearch.client.Response.class);
+        org.apache.http.StatusLine status429 = new org.apache.http.message.BasicStatusLine(
+            org.apache.http.HttpVersion.HTTP_1_1, 429, "Too Many Requests");
+        org.mockito.Mockito.when(err429Response.getStatusLine()).thenReturn(status429);
+        org.mockito.Mockito.when(err429Response.getRequestLine()).thenReturn(
+            new org.apache.http.message.BasicRequestLine("POST", "/test-index/_bulk", org.apache.http.HttpVersion.HTTP_1_1));
+        org.mockito.Mockito.when(err429Response.getHost()).thenReturn(new HttpHost("localhost", 9200, "http"));
+        org.elasticsearch.client.ResponseException ex429 =
+            new org.elasticsearch.client.ResponseException(err429Response);
+
+        org.elasticsearch.client.Response okResponse =
+            org.mockito.Mockito.mock(org.elasticsearch.client.Response.class);
+        String okBody = "{\"took\":1,\"errors\":false}";
+        org.mockito.Mockito.when(okResponse.getEntity()).thenReturn(
+            new ByteArrayEntity(okBody.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON));
+
+        // Case 1: two HTTP 429s followed by success on attempt 3 -> 0 documents ended up rejected
+        org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
+        org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
+            .thenThrow(ex429)
+            .thenThrow(ex429)
+            .thenReturn(okResponse);
+        fn.restClient = mockClient;
+
+        byte[] reqBytes = "{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8);
+        ElasticsearchIO.BulkResult result = fn.executeWithRetry(
+            reqBytes, reqBytes.length, 1000, reqBytes.length, false, System.currentTimeMillis() + 60_000L);
+        assertEquals(1000, result.successCount);
+        assertEquals("Transient HTTP 429s that succeed on retry must not inflate rejected_429",
+            0L, fn.asyncRejected429.sum());
+
+        // Case 2: all 3 attempts fail with HTTP 429 -> counted once (1000), not 3000
+        org.mockito.Mockito.reset(mockClient);
+        org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
+        org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
+            .thenThrow(ex429);
+        try {
+            fn.executeWithRetry(
+                reqBytes, reqBytes.length, 1000, reqBytes.length, false, System.currentTimeMillis() + 60_000L);
+            fail("Expected IOException after exhausting HTTP 429 retries");
+        } catch (java.io.IOException expected) {
+            // expected
+        }
+        assertEquals("Exhausted HTTP 429 retries must count the batch's docCount once",
+            1000L, fn.asyncRejected429.sum());
+    }
+
     // =========================================================================
     // NDJSON Sanitization & Bulk Unit Construction Tests
     // =========================================================================

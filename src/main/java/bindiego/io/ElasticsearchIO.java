@@ -882,10 +882,10 @@ public class ElasticsearchIO {
             static final String RETRY_ATTEMPT_LOG = "Error writing to Elasticsearch. Retry attempt[%d]";
             static final String RETRY_FAILED_LOG = "Error writing to ES after %d attempt(s). No more attempts allowed";
 
-            private transient FluentBackoff retryBackoff;
+            transient FluentBackoff retryBackoff;
             private final Append spec;
             // volatile: read and replaced concurrently by multiple ioExecutor threads
-            private transient volatile RestClient restClient;
+            transient volatile RestClient restClient;
 
             // transient lock — ReentrantLock is not Serializable
             transient Object batchLock;
@@ -932,11 +932,11 @@ public class ElasticsearchIO {
             // accumulate here and are drained into the Beam counters on the bundle
             // thread in @FinishBundle. (Counts from a failed bundle drain with the
             // next successful one — attribution shifts, totals stay correct.)
-            private transient LongAdder asyncDocsIndexed;
-            private transient LongAdder asyncDocsFailedNonRetryable;
-            private transient LongAdder asyncDocsFailedRetriesExhausted;
-            private transient LongAdder asyncRejected429;
-            private transient Queue<Long> asyncBulkLatenciesMs;
+            transient LongAdder asyncDocsIndexed;
+            transient LongAdder asyncDocsFailedNonRetryable;
+            transient LongAdder asyncDocsFailedRetriesExhausted;
+            transient LongAdder asyncRejected429;
+            transient Queue<Long> asyncBulkLatenciesMs;
 
             AppendFn(Append spec) {
                 this.spec = spec;
@@ -1597,7 +1597,7 @@ public class ElasticsearchIO {
              *
              * @throws IOException on unrecoverable HTTP-level failures (exhausted retries)
              */
-            private BulkResult executeWithRetry(byte[] requestBody, int requestBodyLen, int docCount,
+            BulkResult executeWithRetry(byte[] requestBody, int requestBodyLen, int docCount,
                     long batchSizeBytes, boolean compressed, long deadlineMillis)
                     throws IOException, InterruptedException {
                 String endpoint = "/" + spec.getConnectionConf().getIndex() + "/_bulk";
@@ -1606,8 +1606,8 @@ public class ElasticsearchIO {
                 int attempt = 0;
                 int maxAttempts = spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1;
 
+                HttpEntity rawResponseEntity = null;
                 while (true) {
-                    HttpEntity rawResponseEntity = null;
                     try {
                         // Validate client state before making request
                         if (!restClient.isRunning()) {
@@ -1633,22 +1633,7 @@ public class ElasticsearchIO {
                         Response response = restClient.performRequest(request);
                         asyncBulkLatenciesMs.add(System.currentTimeMillis() - requestStartMillis);
                         rawResponseEntity = response.getEntity();
-
-                        // The low-level RestClient already hands back a fully
-                        // heap-buffered entity (the connection is free), so the former
-                        // EntityUtils.toByteArray + re-wrap was a redundant full copy
-                        // of the response body.
-                        // Parse per-item results — does NOT throw on per-item failures.
-                        // docCount seeds the no-errors fast path so it does not depend
-                        // on the filtered response's item list.
-                        BulkResult result = parseBulkResponse(rawResponseEntity,
-                            TARGET_ES_MAJOR_VERSION, false, docCount);
-
-                        logger.debug("Bulk response: {} succeeded, {} retryable failures, {} non-retryable failures",
-                            result.successCount, result.retryableFailures.size(),
-                            result.nonRetryableFailures.size());
-
-                        return result;
+                        break;
 
                     } catch (IOException | IllegalStateException e) {
                         // HTTP-level failure — connection refused, timeout, stale client, or HTTP >= 300
@@ -1658,14 +1643,12 @@ public class ElasticsearchIO {
                         // RestClient throws ResponseException (extends IOException) on HTTP >= 300.
                         // Fail fast on non-retryable client errors (400, 401, 403, 404, 413) instead
                         // of burning maxAttempts retries and holding a backpressure permit on a
-                        // deterministic failure, and count HTTP-level 429 rejections in metrics.
+                        // deterministic failure.
+                        int httpStatus = 0;
                         if (e instanceof ResponseException) {
                             Response errResp = ((ResponseException) e).getResponse();
-                            int httpStatus = (errResp != null && errResp.getStatusLine() != null)
+                            httpStatus = (errResp != null && errResp.getStatusLine() != null)
                                 ? errResp.getStatusLine().getStatusCode() : 0;
-                            if (httpStatus == 429) {
-                                asyncRejected429.add(docCount);
-                            }
                             if (httpStatus > 0 && !isRetryableHttpStatus(httpStatus)) {
                                 logger.error("Non-retryable HTTP {} error from Elasticsearch on _bulk request",
                                     httpStatus, e);
@@ -1706,6 +1689,9 @@ public class ElasticsearchIO {
                         }
 
                         if (attempt >= maxAttempts) {
+                            if (httpStatus == 429) {
+                                asyncRejected429.add(docCount);
+                            }
                             logger.error(RETRY_FAILED_LOG, attempt);
                             throw new IOException("Failed to send bulk request after " + attempt + " attempts", e);
                         }
@@ -1717,14 +1703,34 @@ public class ElasticsearchIO {
                         // combined budget is bounded by RetryConf.maxDuration.
                         if (backoffMillis == BackOff.STOP
                                 || System.currentTimeMillis() + backoffMillis >= deadlineMillis) {
+                            if (httpStatus == 429) {
+                                asyncRejected429.add(docCount);
+                            }
                             throw new IOException("Retry budget exhausted after " + attempt + " attempts", e);
                         }
                         Sleeper.DEFAULT.sleep(backoffMillis);
+                    }
+                }
 
-                    } finally {
-                        if (rawResponseEntity != null) {
-                            EntityUtils.consumeQuietly(rawResponseEntity);
-                        }
+                // Parse per-item results OUTSIDE the HTTP retry loop: once performRequest()
+                // returns a 2xx Response, Elasticsearch has already applied the bulk request.
+                // Treating a malformed/truncated response body as a retryable transport error
+                // would re-POST the entire batch and duplicate every document when idFn is not set.
+                try {
+                    BulkResult result = parseBulkResponse(rawResponseEntity,
+                        TARGET_ES_MAJOR_VERSION, false, docCount);
+
+                    logger.debug("Bulk response: {} succeeded, {} retryable failures, {} non-retryable failures",
+                        result.successCount, result.retryableFailures.size(),
+                        result.nonRetryableFailures.size());
+
+                    return result;
+                } catch (IOException e) {
+                    totalErrors.increment();
+                    throw e;
+                } finally {
+                    if (rawResponseEntity != null) {
+                        EntityUtils.consumeQuietly(rawResponseEntity);
                     }
                 }
             }
