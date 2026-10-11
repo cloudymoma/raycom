@@ -1642,46 +1642,48 @@ public class ElasticsearchIOTest {
 
     @Test
     public void createClientBuilder_standaloneTrustSelfSignedCerts_configuresCustomSslOnHttpClient() throws Exception {
-        java.lang.reflect.Field callbackField =
-            org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
-        callbackField.setAccessible(true);
+        synchronized (ElasticsearchIO.ConnectionConf.class) {
+            java.lang.reflect.Field callbackField =
+                org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
+            callbackField.setAccessible(true);
 
-        java.lang.reflect.Field sslContextField =
-            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslcontext");
-        sslContextField.setAccessible(true);
-        java.lang.reflect.Field sslStrategyField =
-            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslStrategy");
-        sslStrategyField.setAccessible(true);
+            java.lang.reflect.Field sslContextField =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslcontext");
+            sslContextField.setAccessible(true);
+            java.lang.reflect.Field sslStrategyField =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslStrategy");
+            sslStrategyField.setAccessible(true);
 
-        // Baseline: without trustSelfSignedCerts, no custom SSLContext or SSLStrategy is installed
-        ElasticsearchIO.ConnectionConf defaultConf = ElasticsearchIO.ConnectionConf
-            .create("https://es.example.com:9200", "my-index")
-            .withTrustSelfSignedCerts(false);
-        org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback defaultCallback =
-            (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
-                callbackField.get(defaultConf.createClientBuilder());
-        org.apache.http.impl.nio.client.HttpAsyncClientBuilder defaultHttpBuilder =
-            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
-        defaultCallback.customizeHttpClient(defaultHttpBuilder);
-        assertNull("Default ConnectionConf must leave sslContext null",
-            sslContextField.get(defaultHttpBuilder));
-        assertNull("Default ConnectionConf must leave sslStrategy null",
-            sslStrategyField.get(defaultHttpBuilder));
+            // Baseline: without trustSelfSignedCerts, no custom SSLContext or SSLStrategy is installed
+            ElasticsearchIO.ConnectionConf defaultConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withTrustSelfSignedCerts(false);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback defaultCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(defaultConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder defaultHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            defaultCallback.customizeHttpClient(defaultHttpBuilder);
+            assertNull("Default ConnectionConf must leave sslContext null",
+                sslContextField.get(defaultHttpBuilder));
+            assertNull("Default ConnectionConf must leave sslStrategy null",
+                sslStrategyField.get(defaultHttpBuilder));
 
-        // Standalone trustSelfSignedCerts (no keystorePath): must install custom SSLContext and SSLStrategy
-        ElasticsearchIO.ConnectionConf selfSignedConf = ElasticsearchIO.ConnectionConf
-            .create("https://es.example.com:9200", "my-index")
-            .withTrustSelfSignedCerts(true);
-        org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback selfSignedCallback =
-            (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
-                callbackField.get(selfSignedConf.createClientBuilder());
-        org.apache.http.impl.nio.client.HttpAsyncClientBuilder selfSignedHttpBuilder =
-            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
-        selfSignedCallback.customizeHttpClient(selfSignedHttpBuilder);
-        assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLContext",
-            sslContextField.get(selfSignedHttpBuilder));
-        assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLIOSessionStrategy",
-            sslStrategyField.get(selfSignedHttpBuilder));
+            // Standalone trustSelfSignedCerts (no keystorePath): must install custom SSLContext and SSLStrategy
+            ElasticsearchIO.ConnectionConf selfSignedConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withTrustSelfSignedCerts(true);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback selfSignedCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(selfSignedConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder selfSignedHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            selfSignedCallback.customizeHttpClient(selfSignedHttpBuilder);
+            assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLContext",
+                sslContextField.get(selfSignedHttpBuilder));
+            assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLIOSessionStrategy",
+                sslStrategyField.get(selfSignedHttpBuilder));
+        }
     }
 
     @Test(expected = java.io.IOException.class)
@@ -1692,6 +1694,91 @@ public class ElasticsearchIOTest {
             .withKeystorePassword("secret");
 
         conf.createClientBuilder();
+    }
+
+    // =========================================================================
+    // Full-File Review Regression Tests (Items 1–4)
+    // =========================================================================
+
+    @Test
+    public void byteBufferPool_sharedAcrossAppendFnInstancesOnSameWorkerThread() {
+        // Item 1: byteBufferPool must be shared per worker thread (not per AppendFn
+        // instance), otherwise each IO thread retains a separate multi-MB buffer for
+        // every cached AppendFn instance on the worker.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append();
+        ElasticsearchIO.Append.AppendFn fn1 = createTestAppendFn(spec);
+        ElasticsearchIO.Append.AppendFn fn2 = createTestAppendFn(spec);
+
+        assertSame(
+            "All AppendFn instances on the same thread must share a single pooled byte buffer",
+            fn1.byteBufferPool.get(),
+            fn2.byteBufferPool.get());
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void expand_pendingTimeoutNotExceedingRetryMaxDurationPlusSocketTimeout_throwsIllegalStateException() {
+        // Item 2: RetryConf.maxDuration (10 min = 600s) + default socketTimeout (120s) = 720s,
+        // which exceeds the default pendingTimeoutSeconds (300s). The final retry attempt can
+        // start just before maxDuration and run for a full socketTimeout past it, causing
+        // finishBundle to time out while the orphaned task is still resending the batch.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append()
+            .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
+            .withRetryConf(ElasticsearchIO.RetryConf.create(5, org.joda.time.Duration.standardMinutes(10)));
+
+        spec.expand(null);
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void createClientBuilder_standaloneTrustSelfSignedCertsInProduction_throwsIllegalStateException()
+            throws Exception {
+        // Item 3: TrustSelfSignedStrategy without a pinned truststore accepts any 1-cert
+        // chain (allowing MITM with a self-signed cert matching the target hostname) and
+        // must be blocked in production environments just like isIgnoreInsecureSSL.
+        synchronized (ElasticsearchIO.ConnectionConf.class) {
+            System.setProperty("ENVIRONMENT", "production");
+            try {
+                ElasticsearchIO.ConnectionConf selfSignedConf = ElasticsearchIO.ConnectionConf
+                    .create("https://es.example.com:9200", "my-index")
+                    .withTrustSelfSignedCerts(true);
+                java.lang.reflect.Field callbackField =
+                    org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
+                callbackField.setAccessible(true);
+                org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback callback =
+                    (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                        callbackField.get(selfSignedConf.createClientBuilder());
+                callback.customizeHttpClient(org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create());
+            } finally {
+                System.clearProperty("ENVIRONMENT");
+            }
+        }
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_fewerItemsThanExpected_throwsIOException() throws Exception {
+        // Item 4a: 3 documents sent, but response with errors=true only contains 2 items.
+        // Without a count check, the 3rd document is neither counted as indexed nor retried
+        // and is silently lost when the bundle commits.
+        String body = "{\"took\":5,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":201}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":429,\"error\":{\"type\":\"es_rejected_execution_exception\",\"reason\":\"busy\"}}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 3);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_moreItemsThanExpected_throwsIOException() throws Exception {
+        // Item 4b: 1 document sent, but response with errors=true contains 2 items.
+        // Without a count check, docs.get(f.index) in processBatchWithRetry throws
+        // IndexOutOfBoundsException on index 1.
+        String body = "{\"took\":5,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":201}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":429,\"error\":{\"type\":\"es_rejected_execution_exception\",\"reason\":\"busy\"}}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 1);
     }
 }
 

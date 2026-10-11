@@ -496,9 +496,19 @@ public class ElasticsearchIO {
                     throw new IOException("Can't load the client certificate from the keystore", e);
                 }
             } else if (isTrustSelfSignedCerts() && !isIgnoreInsecureSSL()) {
-                // Support withTrustSelfSignedCerts(true) even when no local JKS keystorePath
-                // is provided, trusting self-signed certificates while preserving normal
-                // hostname verification (unlike isIgnoreInsecureSSL).
+                // SECURITY WARNING: Without a keystorePath pinning the cluster's CA or
+                // certificate, TrustSelfSignedStrategy accepts ANY 1-certificate chain.
+                // An attacker on the network path can generate a self-signed certificate
+                // with CN/SAN matching the Elasticsearch hostname, pass hostname
+                // verification, and intercept credentials/API keys and documents (MITM).
+                if (isProductionEnvironment()) {
+                    throw new IllegalStateException(
+                        "Standalone trustSelfSignedCerts (without keystorePath) is FORBIDDEN in production "
+                        + "environments because TrustSelfSignedStrategy accepts any self-signed certificate. "
+                        + "Configure keystorePath with the cluster's certificate or CA instead.");
+                }
+                logger.warn("*** STANDALONE trustSelfSignedCerts IS ENABLED WITHOUT keystorePath ***");
+                logger.warn("*** ANY SELF-SIGNED CERT MATCHING HOSTNAME WILL BE TRUSTED — DO NOT USE IN PRODUCTION ***");
                 try {
                     customSslContext = SSLContexts.custom()
                         .loadTrustMaterial(null, new TrustSelfSignedStrategy())
@@ -559,8 +569,7 @@ public class ElasticsearchIO {
                                     // SECURITY WARNING: This disables ALL TLS certificate verification.
                                     // An attacker in network position can intercept all traffic including
                                     // credentials and documents (MITM attack).
-                                    String env = System.getenv("ENVIRONMENT");
-                                    if ("production".equalsIgnoreCase(env) || "prod".equalsIgnoreCase(env)) {
+                                    if (isProductionEnvironment()) {
                                         throw new IllegalStateException(
                                             "isIgnoreInsecureSSL is FORBIDDEN in production environments. " +
                                             "Configure proper TLS certificates via keystorePath instead.");
@@ -618,6 +627,14 @@ public class ElasticsearchIO {
             );
 
             return restClientBuilder;
+        }
+
+        private static boolean isProductionEnvironment() {
+            String env = System.getenv("ENVIRONMENT");
+            if (env == null || env.isEmpty()) {
+                env = System.getProperty("ENVIRONMENT");
+            }
+            return "production".equalsIgnoreCase(env) || "prod".equalsIgnoreCase(env);
         }
 
         // Double-check pattern: avoids holding ConcurrentHashMap bucket lock during
@@ -845,17 +862,24 @@ public class ElasticsearchIO {
             ConnectionConf connectionConf = getConnectionConf();
             checkState(null != connectionConf, "withConnectionConf() is required");
 
-            // A single bulk request may legitimately run up to the socket timeout
-            // (plus retry backoffs). A pending timeout at or below it guarantees
-            // FinishBundle gives up on requests that are still in flight, failing the
-            // bundle — and bundle retries re-index every already-written document.
+            // A single bulk request may legitimately run up to the retry budget
+            // (RetryConf.maxDuration when retries are enabled) PLUS one full socket
+            // timeout for the final attempt started just before the retry deadline.
+            // A pending timeout at or below (maxDuration + socketTimeout) allows
+            // FinishBundle to give up on requests that are still in flight, failing the
+            // bundle while the orphaned IO task continues resending — duplicating every
+            // already-written document when idFn is not set.
             // Fail at pipeline construction instead of at runtime.
-            int socketTimeoutMillis = connectionConf.getSocketTimeout() != null
+            long socketTimeoutMillis = connectionConf.getSocketTimeout() != null
                 ? connectionConf.getSocketTimeout() : DEFAULT_SOCKET_TIMEOUT_MILLIS;
-            checkState(getPendingTimeoutSeconds() * 1000L > socketTimeoutMillis,
-                "pendingTimeoutSeconds (%s s) must exceed the socket timeout (%s ms), "
+            RetryConf retryConf = getRetryConf();
+            long retryBudgetMillis = (retryConf != null && retryConf.getMaxAttempts() > 1)
+                ? retryConf.getMaxDuration().getMillis() : 0L;
+            long minRequiredMillis = retryBudgetMillis + socketTimeoutMillis;
+            checkState(getPendingTimeoutSeconds() * 1000L > minRequiredMillis,
+                "pendingTimeoutSeconds (%s s) must exceed retry maxDuration (%s ms) + socket timeout (%s ms) = %s ms, "
                 + "or FinishBundle will abandon bulk requests that are still in flight",
-                getPendingTimeoutSeconds(), socketTimeoutMillis);
+                getPendingTimeoutSeconds(), retryBudgetMillis, socketTimeoutMillis, minRequiredMillis);
 
             input.apply(ParDo.of(new AppendFn(this)));
             return PDone.in(input.getPipeline());
@@ -909,9 +933,13 @@ public class ElasticsearchIO {
             private transient String poolKey;
             private transient String poolKeyForLog; // redacted version for logging
 
-            // Performance optimization: reuse byte buffers (exposed subclass avoids toByteArray copy)
+            // Worker-wide ThreadLocal buffer pool: shared across all AppendFn instances
+            // on the worker so each shared ioExecutor thread retains at most ONE reusable
+            // ExposedByteArrayOutputStream, rather than retaining a separate multi-MB
+            // buffer per cached AppendFn instance (which scaled as O(instances * ioThreads)).
             @VisibleForTesting
-            transient ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool;
+            static final ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool =
+                ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
 
             // Shared (per pool key, reference-counted) scheduler for time-based flushing
             private transient ScheduledExecutorService scheduler;
@@ -984,8 +1012,6 @@ public class ElasticsearchIO {
                 asyncRejected429 = new LongAdder();
                 asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
 
-                byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
-
                 retryBackoff = FluentBackoff.DEFAULT
                     .withMaxRetries(0)
                     .withInitialBackoff(RETRY_INITIAL_BACKOFF);
@@ -1006,20 +1032,9 @@ public class ElasticsearchIO {
 
                 initTransientState();
 
-                // Executors and the backpressure semaphore are SHARED across all
-                // instances with the same pool key (reference-counted), so
-                // maxConcurrentRequests bounds the whole worker's in-flight requests
-                // instead of multiplying by the DoFn instance count. Thread names use
-                // the REDACTED key: the raw pool key embeds the username and
-                // password/apiKey hashes, and thread names surface in every stack
-                // trace, thread dump, and %t log pattern.
-                SharedExecutors shared = acquireSharedExecutors(
-                    poolKey, poolKeyForLog, spec.getMaxConcurrentRequests());
-                scheduler = shared.scheduler;
-                ioExecutor = shared.ioExecutor;
-                concurrencySemaphore = shared.semaphore;
-
-                // Get pooled client with retry on failure
+                // Acquire pooled client BEFORE incrementing SharedExecutors refCount:
+                // if client creation throws, Beam does not invoke @Teardown, so acquiring
+                // shared executors first would permanently leak a refCount.
                 try {
                     restClient = connectionConf.getPooledClient();
                 } catch (IOException e) {
@@ -1032,6 +1047,19 @@ public class ElasticsearchIO {
                         "3. Network connectivity and firewall settings\n" +
                         "4. SSL/authentication configuration", e);
                 }
+
+                // Executors and the backpressure semaphore are SHARED across all
+                // instances with the same pool key (reference-counted), so
+                // maxConcurrentRequests bounds the whole worker's in-flight requests
+                // instead of multiplying by the DoFn instance count. Thread names use
+                // the REDACTED key: the raw pool key embeds the username and
+                // password/apiKey hashes, and thread names surface in every stack
+                // trace, thread dump, and %t log pattern.
+                SharedExecutors shared = acquireSharedExecutors(
+                    poolKey, poolKeyForLog, spec.getMaxConcurrentRequests());
+                scheduler = shared.scheduler;
+                ioExecutor = shared.ioExecutor;
+                concurrencySemaphore = shared.semaphore;
 
                 // Schedule the periodic flush ONCE for the whole DoFn lifetime and cancel
                 // it in @Teardown. Scheduling per bundle leaked tasks: @FinishBundle is
@@ -1501,10 +1529,9 @@ public class ElasticsearchIO {
                 // with FluentBackoff's maxRetries (also maxAttempts - 1) so the remaining-retry
                 // count in logs and the backoff state machine stay in lockstep.
                 int maxRetries = retryConf != null ? retryConf.getMaxAttempts() - 1 : 0;
-                // ONE wall-clock retry budget shared by both retry layers (item-level
-                // partial-failure retries and HTTP-level request retries). Applying
-                // maxAttempts independently at each layer multiplied to maxAttempts²
-                // requests per batch, hammering a cluster that was already struggling.
+                // ONE wall-clock retry budget (RetryConf.maxDuration) shared by both retry
+                // layers (item-level partial-failure retries and HTTP-level request retries)
+                // so total backoff time across both layers cannot exceed maxDuration.
                 // Without a RetryConf there are no backoff sleeps, so the budget value
                 // is moot — 30s is a safe bound.
                 long retryBudgetMillis = retryConf != null
@@ -1721,13 +1748,13 @@ public class ElasticsearchIO {
                             logger.warn("IllegalStateException detected - client may be closed. Recreating client...");
                             try {
                                 String currentPoolKey = spec.getConnectionConf().getPoolKey();
-                                // Evict only the exact instance we observed failing — a blind
-                                // remove() could evict a healthy client another IO thread just
-                                // recreated. Close the evicted client: dropping the reference
-                                // leaked its HTTP IO-reactor threads and open sockets on every
-                                // recovery cycle.
+                                // Evict and close only if the client is actually stopped — an
+                                // IllegalStateException from something else (e.g. an invalid
+                                // request or connection pool state) must not close a running
+                                // RestClient that other worker threads are still using.
                                 RestClient stale = restClient;
-                                if (stale != null && clientPool.remove(currentPoolKey, stale)) {
+                                if (stale != null && !stale.isRunning()
+                                        && clientPool.remove(currentPoolKey, stale)) {
                                     try {
                                         stale.close();
                                     } catch (IOException closeEx) {
@@ -1846,6 +1873,11 @@ public class ElasticsearchIO {
 
         // Fast path: no errors at all
         if (!errorsNode.booleanValue()) {
+            if (expectedItemCount >= 0 && items.isArray() && items.size() != expectedItemCount) {
+                throw new IOException(
+                    "Malformed Elasticsearch bulk response: expected " + expectedItemCount
+                    + " items but received " + items.size());
+            }
             return new BulkResult(expectedItemCount >= 0 ? expectedItemCount : items.size(),
                 new ArrayList<>(0), new ArrayList<>(0));
         }
@@ -1854,6 +1886,12 @@ public class ElasticsearchIO {
             throw new IOException(
                 "Malformed Elasticsearch bulk response: 'errors' is true but 'items' is missing or not an array: "
                 + searchResult);
+        }
+
+        if (expectedItemCount >= 0 && items.size() != expectedItemCount) {
+            throw new IOException(
+                "Malformed Elasticsearch bulk response: expected " + expectedItemCount
+                + " items but received " + items.size());
         }
 
         // Slow path: classify each failed item
