@@ -77,6 +77,7 @@ import java.io.ByteArrayOutputStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 
 import org.apache.beam.sdk.metrics.Counter;
@@ -873,6 +874,11 @@ public class ElasticsearchIO {
                 Metrics.counter(ElasticsearchIO.class, "docsFailedRetriesExhausted");
             private static final Counter METRIC_DOCS_DROPPED_OVERSIZED =
                 Metrics.counter(ElasticsearchIO.class, "docsDroppedOversized");
+            // Per-attempt backpressure signal: counts every item-level 429 rejection
+            // event across all retry attempts (both per-item 429s in a 200 _bulk
+            // response and whole-batch HTTP 429 responses, which add docCount per
+            // rejected attempt). Terminal document failures after retries are exhausted
+            // are tracked separately by METRIC_DOCS_FAILED_RETRIES_EXHAUSTED.
             private static final Counter METRIC_BULK_ITEMS_REJECTED_429 =
                 Metrics.counter(ElasticsearchIO.class, "bulkItemsRejected429");
             private static final Distribution METRIC_BULK_LATENCY_MS =
@@ -882,24 +888,29 @@ public class ElasticsearchIO {
             static final String RETRY_ATTEMPT_LOG = "Error writing to Elasticsearch. Retry attempt[%d]";
             static final String RETRY_FAILED_LOG = "Error writing to ES after %d attempt(s). No more attempts allowed";
 
+            @VisibleForTesting
             transient FluentBackoff retryBackoff;
             private final Append spec;
             // volatile: read and replaced concurrently by multiple ioExecutor threads
+            @VisibleForTesting
             transient volatile RestClient restClient;
 
             // transient lock — ReentrantLock is not Serializable
-            transient Object batchLock;
+            private transient Object batchLock;
             // Each entry is one complete pre-encoded NDJSON bulk unit
             // (action line + source + trailing newline)
+            @VisibleForTesting
             transient List<byte[]> batch;
+            @VisibleForTesting
             transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
-            volatile long lastFlushTime;
+            private volatile long lastFlushTime;
 
             // Connection pooling
             private transient String poolKey;
             private transient String poolKeyForLog; // redacted version for logging
 
             // Performance optimization: reuse byte buffers (exposed subclass avoids toByteArray copy)
+            @VisibleForTesting
             transient ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool;
 
             // Shared (per pool key, reference-counted) scheduler for time-based flushing
@@ -909,49 +920,54 @@ public class ElasticsearchIO {
             private transient ScheduledFuture<?> flushTask;
 
             // Shared IO executor — avoids starving ForkJoinPool.commonPool() with blocking HTTP calls
+            @VisibleForTesting
             transient ExecutorService ioExecutor;
 
             // Shared backpressure: bounds in-flight ES requests per worker, not per instance
+            @VisibleForTesting
             transient Semaphore concurrencySemaphore;
 
             // transient ConcurrentLinkedQueue — lock-free, no serialization issue
+            @VisibleForTesting
             transient Queue<CompletableFuture<Void>> pendingOperations;
 
             // Count of flushes that have swapped the batch out but not yet registered
             // their future in pendingOperations (or restored the batch). FinishBundle
             // must not snapshot pendingOperations while this is non-zero, or it can
             // commit the bundle past work that is in flight but untracked.
-            transient AtomicInteger unregisteredFlushes;
+            private transient AtomicInteger unregisteredFlushes;
 
             // First failure from a self-removed future (see flushBatch): completed
             // futures leave pendingOperations eagerly, so their errors must be
             // captured separately for FinishBundle to propagate.
+            @VisibleForTesting
             transient AtomicReference<Throwable> firstAsyncFailure;
 
             // IO threads have no Beam metrics container, so async completions
-            // accumulate here and are drained into the Beam counters on the bundle
-            // thread in @FinishBundle. (Counts from a failed bundle drain with the
-            // next successful one — attribution shifts, totals stay correct.)
-            transient LongAdder asyncDocsIndexed;
+            // (and element-level non-retryable rejections) accumulate here and are
+            // drained into the Beam counters on the bundle thread in @FinishBundle.
+            // (Counts from a failed bundle drain with the next successful one —
+            // attribution shifts, totals stay correct.)
+            private transient LongAdder asyncDocsIndexed;
+            @VisibleForTesting
             transient LongAdder asyncDocsFailedNonRetryable;
-            transient LongAdder asyncDocsFailedRetriesExhausted;
+            private transient LongAdder asyncDocsFailedRetriesExhausted;
+            @VisibleForTesting
             transient LongAdder asyncRejected429;
-            transient Queue<Long> asyncBulkLatenciesMs;
+            private transient Queue<Long> asyncBulkLatenciesMs;
 
             AppendFn(Append spec) {
                 this.spec = spec;
             }
 
-            @Setup
-            public void setup() throws IOException {
-                ConnectionConf connectionConf = spec.getConnectionConf();
-                poolKey = connectionConf.getPoolKey();
-                poolKeyForLog = connectionConf.getPoolKeyForLogging();
-
-                // Initialize lock after deserialization
+            /**
+             * Initializes non-network transient state after DoFn deserialization.
+             * Extracted so unit tests can initialize an {@link AppendFn} in one call
+             * without duplicating {@link #setup()} field wiring by hand.
+             */
+            @VisibleForTesting
+            void initTransientState() {
                 batchLock = new Object();
-
-                // Initialize lock-free queue after deserialization
                 pendingOperations = new ConcurrentLinkedQueue<>();
                 unregisteredFlushes = new AtomicInteger(0);
                 firstAsyncFailure = new AtomicReference<>();
@@ -962,8 +978,28 @@ public class ElasticsearchIO {
                 asyncRejected429 = new LongAdder();
                 asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
 
-                // Initialize ThreadLocal after deserialization
                 byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
+                concurrencySemaphore = new Semaphore(spec.getMaxConcurrentRequests());
+
+                retryBackoff = FluentBackoff.DEFAULT
+                    .withMaxRetries(0)
+                    .withInitialBackoff(RETRY_INITIAL_BACKOFF);
+
+                if (spec.getRetryConf() != null) {
+                    retryBackoff = FluentBackoff.DEFAULT
+                        .withInitialBackoff(RETRY_INITIAL_BACKOFF)
+                        .withMaxRetries(spec.getRetryConf().getMaxAttempts() - 1)
+                        .withMaxCumulativeBackoff(spec.getRetryConf().getMaxDuration());
+                }
+            }
+
+            @Setup
+            public void setup() throws IOException {
+                ConnectionConf connectionConf = spec.getConnectionConf();
+                poolKey = connectionConf.getPoolKey();
+                poolKeyForLog = connectionConf.getPoolKeyForLogging();
+
+                initTransientState();
 
                 // Executors and the backpressure semaphore are SHARED across all
                 // instances with the same pool key (reference-counted), so
@@ -990,17 +1026,6 @@ public class ElasticsearchIO {
                         "2. Host/DNS resolution is working: " + connectionConf.getAddress() + "\n" +
                         "3. Network connectivity and firewall settings\n" +
                         "4. SSL/authentication configuration", e);
-                }
-
-                retryBackoff = FluentBackoff.DEFAULT
-                    .withMaxRetries(0)
-                    .withInitialBackoff(RETRY_INITIAL_BACKOFF);
-
-                if (spec.getRetryConf() != null) {
-                    retryBackoff = FluentBackoff.DEFAULT
-                        .withInitialBackoff(RETRY_INITIAL_BACKOFF)
-                        .withMaxRetries(spec.getRetryConf().getMaxAttempts() - 1)
-                        .withMaxCumulativeBackoff(spec.getRetryConf().getMaxDuration());
                 }
 
                 // Schedule the periodic flush ONCE for the whole DoFn lifetime and cancel
@@ -1058,7 +1083,7 @@ public class ElasticsearchIO {
                 String doc = context.element();
                 if (doc == null) {
                     totalErrors.increment();
-                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
+                    asyncDocsFailedNonRetryable.increment();
                     logger.error("Null document received in ElasticsearchIO.AppendFn — skipping.");
                     return;
                 }
@@ -1073,19 +1098,8 @@ public class ElasticsearchIO {
                 int docLen = trimTrailingNewlines(docUtf8);
                 if (isBlankUtf8(docUtf8, docLen)) {
                     totalErrors.increment();
-                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
+                    asyncDocsFailedNonRetryable.increment();
                     logger.error("Empty or whitespace-only document received in ElasticsearchIO.AppendFn — skipping.");
-                    return;
-                }
-
-                // Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between
-                // tokens (outside string literals). A raw CR/LF inside a string literal is
-                // invalid JSON that Elasticsearch rejects with mapper_parsing_exception;
-                // rewriting it to a space would silently alter the stored value.
-                if (hasUnescapedNewlineInJsonString(docUtf8, docLen)) {
-                    totalErrors.increment();
-                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
-                    logger.error("Document contains unescaped CR/LF inside a JSON string literal — skipping.");
                     return;
                 }
 
@@ -1102,16 +1116,19 @@ public class ElasticsearchIO {
                     return;
                 }
 
-                SerializableFunction<String, String> idFn = spec.getIdFn();
-                String id = idFn != null ? idFn.apply(doc) : null;
-                if (id != null && id.isEmpty()) {
+                // Single-pass construction + validation: buildBulkUnit resolves idFn
+                // (rejecting empty _id) and compacts inter-token newlines while rejecting
+                // unescaped CR/LF inside JSON string literals via IllegalArgumentException.
+                final byte[] unit;
+                try {
+                    unit = buildBulkUnit(doc, docUtf8, docLen, spec.getIdFn());
+                } catch (IllegalArgumentException e) {
                     totalErrors.increment();
-                    METRIC_DOCS_FAILED_NON_RETRYABLE.inc();
-                    logger.error("idFn returned an empty _id in ElasticsearchIO.AppendFn — skipping.");
+                    asyncDocsFailedNonRetryable.increment();
+                    logger.error("Invalid document in ElasticsearchIO.AppendFn ({}) — skipping.",
+                        e.getMessage());
                     return;
                 }
-
-                byte[] unit = buildBulkUnitWithResolvedId(id, docUtf8, docLen);
 
                 // Full bulk-unit check including action metadata line overhead:
                 // currentBatchSizeBytes tracks unit.length, so a single unit must also fit
@@ -1201,6 +1218,7 @@ public class ElasticsearchIO {
             }
 
             // Propagate errors instead of silently dropping data
+            @VisibleForTesting
             void waitForPendingOperations() throws IOException, InterruptedException {
                 long timeoutSecs = spec.getPendingTimeoutSeconds();
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSecs);
@@ -1346,13 +1364,19 @@ public class ElasticsearchIO {
              *     swapping the batch so the timer thread is never parked and never resets
              *     {@code lastFlushTime} or triggers {@code restoreBatch} on contention.
              */
+            @VisibleForTesting
             void flushBatch(boolean mayBlock) {
                 // Capture local references so a concurrent @Teardown cannot cause NPE
                 // when releasing the semaphore permit in the async task's finally block.
+                // Fail loudly if called before setup() or after @Teardown (e.g. in a
+                // misconfigured test): returning silently with a non-empty batch would
+                // cause finishBundle()'s quiescence loop to spin forever.
                 final Semaphore sem = concurrencySemaphore;
                 final ExecutorService executor = ioExecutor;
                 if (sem == null || executor == null) {
-                    return;
+                    throw new IllegalStateException(
+                        "Cannot flush batch: AppendFn is not initialized or has already been torn down "
+                        + "(concurrencySemaphore=" + sem + ", ioExecutor=" + executor + ")");
                 }
 
                 final SwappedBatch swapped;
@@ -1617,6 +1641,7 @@ public class ElasticsearchIO {
              *
              * @throws IOException on unrecoverable HTTP-level failures (exhausted retries)
              */
+            @VisibleForTesting
             BulkResult executeWithRetry(byte[] requestBody, int requestBodyLen, int docCount,
                     long batchSizeBytes, boolean compressed, long deadlineMillis)
                     throws IOException, InterruptedException {
@@ -1664,16 +1689,21 @@ public class ElasticsearchIO {
                         // Fail fast on non-retryable client errors (400, 401, 403, 404, 413) instead
                         // of burning maxAttempts retries and holding a backpressure permit on a
                         // deterministic failure.
-                        int httpStatus = 0;
                         if (e instanceof ResponseException) {
                             Response errResp = ((ResponseException) e).getResponse();
-                            httpStatus = (errResp != null && errResp.getStatusLine() != null)
+                            int httpStatus = (errResp != null && errResp.getStatusLine() != null)
                                 ? errResp.getStatusLine().getStatusCode() : 0;
                             if (httpStatus > 0 && !isRetryableHttpStatus(httpStatus)) {
                                 logger.error("Non-retryable HTTP {} error from Elasticsearch on _bulk request",
                                     httpStatus, e);
                                 throw new IOException(
                                     "Non-retryable HTTP " + httpStatus + " error from Elasticsearch", e);
+                            }
+                            if (httpStatus == 429) {
+                                // Unified per-attempt backpressure signal: count every
+                                // HTTP-level 429 rejection event across all attempts,
+                                // matching the per-item 429 counting in processBatchWithRetry.
+                                asyncRejected429.add(docCount);
                             }
                         }
 
@@ -1709,9 +1739,6 @@ public class ElasticsearchIO {
                         }
 
                         if (attempt >= maxAttempts) {
-                            if (httpStatus == 429) {
-                                asyncRejected429.add(docCount);
-                            }
                             logger.error(RETRY_FAILED_LOG, attempt);
                             throw new IOException("Failed to send bulk request after " + attempt + " attempts", e);
                         }
@@ -1723,9 +1750,6 @@ public class ElasticsearchIO {
                         // combined budget is bounded by RetryConf.maxDuration.
                         if (backoffMillis == BackOff.STOP
                                 || System.currentTimeMillis() + backoffMillis >= deadlineMillis) {
-                            if (httpStatus == 429) {
-                                asyncRejected429.add(docCount);
-                            }
                             throw new IOException("Retry budget exhausted after " + attempt + " attempts", e);
                         }
                         Sleeper.DEFAULT.sleep(backoffMillis);
@@ -1909,61 +1933,32 @@ public class ElasticsearchIO {
     }
 
     /**
-     * Returns {@code true} if {@code utf8[0..len)} contains a raw unescaped
-     * {@code '\r'} or {@code '\n'} inside a JSON string literal.
-     *
-     * <p>Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between
-     * tokens (outside string literals). A raw CR/LF inside a string literal is
-     * invalid JSON that Elasticsearch rejects with {@code mapper_parsing_exception};
-     * rewriting it to {@code ' '} would silently mutate the stored string value.
-     */
-    static boolean hasUnescapedNewlineInJsonString(byte[] utf8, int len) {
-        boolean inString = false;
-        boolean escaped = false;
-        for (int i = 0; i < len; i++) {
-            byte b = utf8[i];
-            if (!inString) {
-                if (b == '"') {
-                    inString = true;
-                }
-            } else if (escaped) {
-                escaped = false;
-            } else if (b == '\\') {
-                escaped = true;
-            } else if (b == '"') {
-                inString = false;
-            } else if (b == '\n' || b == '\r') {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Builds one complete NDJSON bulk entry: {@code action_line + sanitized_source + '\n'}.
+     * Builds one complete NDJSON bulk entry: {@code action_line + sanitized_source + '\n'}
+     * in a single pass over the document bytes.
      *
      * <p>With an {@code idFn} configured, the action line carries a deterministic
      * {@code _id} encoded directly to UTF-8 bytes via {@link ObjectMapper#writeValueAsBytes}
      * (avoiding intermediate String allocations) so HTTP-level resends and Beam bundle
      * retries overwrite the same document instead of duplicating it under a fresh auto-id.
+     * An empty {@code _id} ({@code ""}) is rejected with {@link IllegalArgumentException}.
      *
-     * <p>Any inter-token {@code '\r'} or {@code '\n'} whitespace outside JSON string literals
-     * is replaced in place with ASCII space ({@code ' '}) so pretty-printed JSON is compacted
-     * onto a single NDJSON line without mutating string values.
+     * <p>Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between tokens
+     * (outside string literals): inter-token {@code '\r'} / {@code '\n'} are replaced
+     * in place with ASCII space ({@code ' '}), while any unescaped {@code '\r'} / {@code '\n'}
+     * inside a JSON string literal throws {@link IllegalArgumentException} instead of
+     * silently mutating the stored string value.
      */
+    @VisibleForTesting
     static byte[] buildBulkUnit(
             String doc,
             byte[] docUtf8,
             int docLen,
             @Nullable SerializableFunction<String, String> idFn) throws IOException {
         String id = idFn != null ? idFn.apply(doc) : null;
-        return buildBulkUnitWithResolvedId(id, docUtf8, docLen);
-    }
+        if (id != null && id.isEmpty()) {
+            throw new IllegalArgumentException("idFn returned an empty _id");
+        }
 
-    static byte[] buildBulkUnitWithResolvedId(
-            @Nullable String id,
-            byte[] docUtf8,
-            int docLen) throws IOException {
         final byte[] unit;
         final int docStartOffset;
 

@@ -1130,16 +1130,27 @@ public class ElasticsearchIOTest {
     // Bundle Fault-Tolerance & Concurrent Flush Safety Tests
     // =========================================================================
 
+    private static ElasticsearchIO.Append.AppendFn createTestAppendFn(ElasticsearchIO.Append spec) {
+        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        fn.initTransientState();
+        fn.startBundle(null);
+        return fn;
+    }
+
+    private static ElasticsearchIO.Append.AppendFn.ProcessContext mockProcessContext(String element) {
+        ElasticsearchIO.Append.AppendFn.ProcessContext ctx =
+            org.mockito.Mockito.mock(ElasticsearchIO.Append.AppendFn.ProcessContext.class);
+        org.mockito.Mockito.when(ctx.element()).thenReturn(element);
+        return ctx;
+    }
+
     @Test
     public void waitForPendingOperations_removeAllPreservesConcurrentlyAddedFutures() throws Exception {
         // Exercises AppendFn.waitForPendingOperations() directly: while allOf(futures).get()
         // is blocked awaiting f1, a concurrent thread registers f2 in pendingOperations and
         // then completes f1. waitForPendingOperations() must remove only f1 and preserve f2.
         ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
-        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
-        fn.batchLock = new Object();
-        fn.unregisteredFlushes = new AtomicInteger(0);
-        fn.startBundle(null);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
 
         CompletableFuture<Void> f1 = new CompletableFuture<>();
         CompletableFuture<Void> f2 = new CompletableFuture<>();
@@ -1172,10 +1183,7 @@ public class ElasticsearchIOTest {
         // Bundle 2's waitForPendingOperations() must not throw because startBundle() allocated
         // fresh pendingOperations and firstAsyncFailure instances for Bundle 2.
         ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
-        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
-        fn.batchLock = new Object();
-        fn.unregisteredFlushes = new AtomicInteger(0);
-        fn.byteBufferPool = ThreadLocal.withInitial(() -> new ElasticsearchIO.ExposedByteArrayOutputStream(8192));
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
         fn.concurrencySemaphore = new Semaphore(2);
 
         CountDownLatch allowBundle1TaskToFail = new CountDownLatch(1);
@@ -1183,8 +1191,7 @@ public class ElasticsearchIOTest {
         try {
             fn.ioExecutor = testExecutor;
 
-            // Bundle 1 starts and flushes a non-empty batch
-            fn.startBundle(null);
+            // Bundle 1 flushes a non-empty batch
             AtomicReference<Throwable> bundle1FailureRef = fn.firstAsyncFailure;
             fn.batch.add("{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
             fn.currentBatchSizeBytes = 22;
@@ -1226,10 +1233,7 @@ public class ElasticsearchIOTest {
         // shared ioExecutor, the task must still release its permit back to the shared
         // semaphore and must not NPE on byteBufferPool or concurrencySemaphore.
         ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
-        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
-        fn.batchLock = new Object();
-        fn.unregisteredFlushes = new AtomicInteger(0);
-        fn.byteBufferPool = ThreadLocal.withInitial(() -> new ElasticsearchIO.ExposedByteArrayOutputStream(8192));
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
 
         Semaphore sharedSemaphore = new Semaphore(1);
         ExecutorService sharedExecutor = Executors.newSingleThreadExecutor();
@@ -1237,7 +1241,6 @@ public class ElasticsearchIOTest {
         try {
             fn.concurrencySemaphore = sharedSemaphore;
             fn.ioExecutor = sharedExecutor;
-            fn.startBundle(null);
 
             // Hold the executor thread so the flushed batch stays queued during @Teardown
             sharedExecutor.submit(() -> {
@@ -1265,6 +1268,37 @@ public class ElasticsearchIOTest {
             sharedSemaphore.release();
         } finally {
             sharedExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void flushBatch_whenExecutorOrSemaphoreNull_throwsIllegalStateException() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        fn.batch.add("{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
+        fn.currentBatchSizeBytes = 22;
+
+        // ioExecutor is null (e.g. setup() not called or closeClient() already ran)
+        try {
+            fn.flushBatch(true);
+            fail("Expected IllegalStateException when ioExecutor is null");
+        } catch (IllegalStateException expected) {
+            // expected
+        }
+
+        // concurrencySemaphore is null
+        ExecutorService testExecutor = Executors.newSingleThreadExecutor();
+        try {
+            fn.ioExecutor = testExecutor;
+            fn.concurrencySemaphore = null;
+            try {
+                fn.flushBatch(true);
+                fail("Expected IllegalStateException when concurrencySemaphore is null");
+            } catch (IllegalStateException expected) {
+                // expected
+            }
+        } finally {
+            testExecutor.shutdownNow();
         }
     }
 
@@ -1319,12 +1353,10 @@ public class ElasticsearchIOTest {
         ElasticsearchIO.Append spec = ElasticsearchIO.append()
             .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
             .withRetryConf(ElasticsearchIO.RetryConf.create(3, org.joda.time.Duration.standardMinutes(1)));
-        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
         fn.retryBackoff = org.apache.beam.sdk.util.FluentBackoff.DEFAULT
             .withInitialBackoff(org.joda.time.Duration.millis(1))
             .withMaxRetries(2);
-        fn.asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
-        fn.asyncRejected429 = new java.util.concurrent.atomic.LongAdder();
 
         org.elasticsearch.client.RestClient mockClient =
             org.mockito.Mockito.mock(org.elasticsearch.client.RestClient.class);
@@ -1355,16 +1387,14 @@ public class ElasticsearchIOTest {
     }
 
     @Test
-    public void executeWithRetry_http429Retries_onlyCountsWhenRetriesExhausted() throws Exception {
+    public void executeWithRetry_http429Retries_countsEveryRejectionAttemptAsBackpressureSignal() throws Exception {
         ElasticsearchIO.Append spec = ElasticsearchIO.append()
             .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
             .withRetryConf(ElasticsearchIO.RetryConf.create(3, org.joda.time.Duration.standardMinutes(1)));
-        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
         fn.retryBackoff = org.apache.beam.sdk.util.FluentBackoff.DEFAULT
             .withInitialBackoff(org.joda.time.Duration.millis(1))
             .withMaxRetries(2);
-        fn.asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
-        fn.asyncRejected429 = new java.util.concurrent.atomic.LongAdder();
 
         org.elasticsearch.client.RestClient mockClient =
             org.mockito.Mockito.mock(org.elasticsearch.client.RestClient.class);
@@ -1385,7 +1415,8 @@ public class ElasticsearchIOTest {
         org.mockito.Mockito.when(okResponse.getEntity()).thenReturn(
             new ByteArrayEntity(okBody.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON));
 
-        // Case 1: two HTTP 429s followed by success on attempt 3 -> 0 documents ended up rejected
+        // Case 1: two HTTP 429s followed by success on attempt 3 -> 2000 rejection events
+        // (unified per-attempt backpressure signal matching processBatchWithRetry's per-item counting)
         org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
         org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
             .thenThrow(ex429)
@@ -1397,10 +1428,10 @@ public class ElasticsearchIOTest {
         ElasticsearchIO.BulkResult result = fn.executeWithRetry(
             reqBytes, reqBytes.length, 1000, reqBytes.length, false, System.currentTimeMillis() + 60_000L);
         assertEquals(1000, result.successCount);
-        assertEquals("Transient HTTP 429s that succeed on retry must not inflate rejected_429",
-            0L, fn.asyncRejected429.sum());
+        assertEquals("Each HTTP 429 attempt must add docCount to asyncRejected429 as a backpressure signal",
+            2000L, fn.asyncRejected429.sumThenReset());
 
-        // Case 2: all 3 attempts fail with HTTP 429 -> counted once (1000), not 3000
+        // Case 2: all 3 attempts fail with HTTP 429 -> 3000 rejection events across 3 attempts
         org.mockito.Mockito.reset(mockClient);
         org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
         org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
@@ -1412,12 +1443,12 @@ public class ElasticsearchIOTest {
         } catch (java.io.IOException expected) {
             // expected
         }
-        assertEquals("Exhausted HTTP 429 retries must count the batch's docCount once",
-            1000L, fn.asyncRejected429.sum());
+        assertEquals("All 3 rejected HTTP 429 attempts must be counted in asyncRejected429",
+            3000L, fn.asyncRejected429.sum());
     }
 
     // =========================================================================
-    // NDJSON Sanitization & Bulk Unit Construction Tests
+    // NDJSON Sanitization, Single-Pass Bulk Unit & processElement Validation Tests
     // =========================================================================
 
     @Test
@@ -1473,20 +1504,6 @@ public class ElasticsearchIOTest {
         assertEquals("", lines[2]);
     }
 
-    @Test
-    public void hasUnescapedNewlineInJsonString_distinguishesInterTokenFromStringLiteralNewlines() {
-        // Pretty-printed JSON with raw newlines outside strings and escaped \n inside a string is valid
-        byte[] validPretty = "{\n  \"msg\": \"line1\\nline2\",\r\n  \"n\": 1\n}".getBytes(StandardCharsets.UTF_8);
-        assertFalse(ElasticsearchIO.hasUnescapedNewlineInJsonString(validPretty, validPretty.length));
-
-        // Raw LF or CR inside a JSON string literal is invalid JSON and must be flagged
-        byte[] rawLfInString = "{\"msg\": \"line1\nline2\"}".getBytes(StandardCharsets.UTF_8);
-        assertTrue(ElasticsearchIO.hasUnescapedNewlineInJsonString(rawLfInString, rawLfInString.length));
-
-        byte[] rawCrInString = "{\"msg\": \"line1\rline2\"}".getBytes(StandardCharsets.UTF_8);
-        assertTrue(ElasticsearchIO.hasUnescapedNewlineInJsonString(rawCrInString, rawCrInString.length));
-    }
-
     @Test(expected = IllegalArgumentException.class)
     public void buildBulkUnit_rawNewlineInsideJsonString_throwsInsteadOfMutatingValue() throws Exception {
         String invalidJson = "{\"msg\":\"hello\nworld\"}";
@@ -1494,15 +1511,75 @@ public class ElasticsearchIOTest {
         ElasticsearchIO.buildBulkUnit(invalidJson, utf8, utf8.length, null);
     }
 
-    @Test
-    public void buildBulkUnit_emptyId_doesNotSilentlyFallBackToAutoId() throws Exception {
+    @Test(expected = IllegalArgumentException.class)
+    public void buildBulkUnit_emptyId_throwsIllegalArgumentException() throws Exception {
         String doc = "{\"a\":1}";
         byte[] utf8 = doc.getBytes(StandardCharsets.UTF_8);
-        byte[] unit = ElasticsearchIO.buildBulkUnit(doc, utf8, utf8.length, d -> "");
-        String unitStr = new String(unit, StandardCharsets.UTF_8);
+        ElasticsearchIO.buildBulkUnit(doc, utf8, utf8.length, d -> "");
+    }
 
-        assertTrue("Empty id must not silently become auto-id {\"index\":{}}",
-            unitStr.startsWith("{\"index\":{\"_id\":\"\"}}\n"));
+    @Test
+    public void processElement_nullAndBlankDocuments_rejectedAndCountedWithoutAddingToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append();
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext(null));
+        fn.processElement(mockProcessContext("   \t\r\n  "));
+
+        assertTrue("Null and blank documents must not be added to batch", fn.batch.isEmpty());
+        assertEquals("Both null and blank documents must be counted in asyncDocsFailedNonRetryable",
+            2L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment for each rejected document",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 2L);
+    }
+
+    @Test
+    public void processElement_rawNewlineInsideJsonString_rejectedAndCountedWithoutAddingToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append();
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext("{\"msg\":\"line1\nline2\"}"));
+        fn.processElement(mockProcessContext("{\"msg\":\"line1\rline2\"}"));
+
+        assertTrue("Documents with raw CR/LF inside a JSON string must not be added to batch",
+            fn.batch.isEmpty());
+        assertEquals("Both invalid documents must be counted in asyncDocsFailedNonRetryable",
+            2L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment for each rejected document",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 2L);
+    }
+
+    @Test
+    public void processElement_emptyIdFromIdFn_rejectedAndCountedWithoutAddingToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> "");
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext("{\"a\":1}"));
+
+        assertTrue("Document with empty _id must not be added to batch", fn.batch.isEmpty());
+        assertEquals("Empty _id rejection must be counted in asyncDocsFailedNonRetryable",
+            1L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment when idFn returns empty _id",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 1L);
+    }
+
+    @Test
+    public void processElement_validPrettyPrintedJson_compactedInSinglePassAndAddedToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> "doc-1");
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+
+        String prettyDoc = "{\n  \"msg\": \"line1\\nline2\",\r\n  \"n\": 1\n}\r\n";
+        fn.processElement(mockProcessContext(prettyDoc));
+
+        assertEquals("Valid document must not increment non-retryable failures",
+            0L, fn.asyncDocsFailedNonRetryable.sum());
+        assertEquals("Valid document must be added to batch", 1, fn.batch.size());
+        String unitStr = new String(fn.batch.get(0), StandardCharsets.UTF_8);
+        assertEquals("{\"index\":{\"_id\":\"doc-1\"}}\n{   \"msg\": \"line1\\nline2\",    \"n\": 1 }\n",
+            unitStr);
     }
 
     // =========================================================================
