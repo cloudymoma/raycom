@@ -964,6 +964,12 @@ public class ElasticsearchIO {
              * Initializes non-network transient state after DoFn deserialization.
              * Extracted so unit tests can initialize an {@link AppendFn} in one call
              * without duplicating {@link #setup()} field wiring by hand.
+             *
+             * <p>Note: {@code concurrencySemaphore}, {@code ioExecutor}, and
+             * {@code scheduler} are intentionally left unset here so {@link #setup()}
+             * must wire the worker-shared instances from {@link #acquireSharedExecutors}
+             * (and {@link #flushBatch} fails loudly with {@link IllegalStateException}
+             * if they are missing).
              */
             @VisibleForTesting
             void initTransientState() {
@@ -979,7 +985,6 @@ public class ElasticsearchIO {
                 asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
 
                 byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
-                concurrencySemaphore = new Semaphore(spec.getMaxConcurrentRequests());
 
                 retryBackoff = FluentBackoff.DEFAULT
                     .withMaxRetries(0)
@@ -1118,11 +1123,14 @@ public class ElasticsearchIO {
 
                 // Single-pass construction + validation: buildBulkUnit resolves idFn
                 // (rejecting empty _id) and compacts inter-token newlines while rejecting
-                // unescaped CR/LF inside JSON string literals via IllegalArgumentException.
+                // unescaped CR/LF inside JSON string literals via InvalidDocumentException.
+                // Catching only InvalidDocumentException ensures exceptions thrown by user
+                // idFn code (e.g. NumberFormatException / IllegalArgumentException) still
+                // propagate and fail the bundle instead of silently dropping documents.
                 final byte[] unit;
                 try {
                     unit = buildBulkUnit(doc, docUtf8, docLen, spec.getIdFn());
-                } catch (IllegalArgumentException e) {
+                } catch (InvalidDocumentException e) {
                     totalErrors.increment();
                     asyncDocsFailedNonRetryable.increment();
                     logger.error("Invalid document in ElasticsearchIO.AppendFn ({}) — skipping.",
@@ -1933,6 +1941,23 @@ public class ElasticsearchIO {
     }
 
     /**
+     * Dedicated unchecked exception for deterministic document/ID validation failures
+     * (empty {@code _id} or unescaped CR/LF inside a JSON string literal).
+     *
+     * <p>Deliberately extends {@link RuntimeException} directly rather than
+     * {@link IllegalArgumentException} so {@link Append.AppendFn#processElement}
+     * never mistakes an {@link IllegalArgumentException} (such as
+     * {@link NumberFormatException} or {@code Preconditions.checkArgument}) thrown
+     * by user-supplied {@code idFn} code for a non-retryable document skip.
+     */
+    @VisibleForTesting
+    static final class InvalidDocumentException extends RuntimeException {
+        InvalidDocumentException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * Builds one complete NDJSON bulk entry: {@code action_line + sanitized_source + '\n'}
      * in a single pass over the document bytes.
      *
@@ -1940,12 +1965,12 @@ public class ElasticsearchIO {
      * {@code _id} encoded directly to UTF-8 bytes via {@link ObjectMapper#writeValueAsBytes}
      * (avoiding intermediate String allocations) so HTTP-level resends and Beam bundle
      * retries overwrite the same document instead of duplicating it under a fresh auto-id.
-     * An empty {@code _id} ({@code ""}) is rejected with {@link IllegalArgumentException}.
+     * An empty {@code _id} ({@code ""}) is rejected with {@link InvalidDocumentException}.
      *
      * <p>Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between tokens
      * (outside string literals): inter-token {@code '\r'} / {@code '\n'} are replaced
      * in place with ASCII space ({@code ' '}), while any unescaped {@code '\r'} / {@code '\n'}
-     * inside a JSON string literal throws {@link IllegalArgumentException} instead of
+     * inside a JSON string literal throws {@link InvalidDocumentException} instead of
      * silently mutating the stored string value.
      */
     @VisibleForTesting
@@ -1956,7 +1981,7 @@ public class ElasticsearchIO {
             @Nullable SerializableFunction<String, String> idFn) throws IOException {
         String id = idFn != null ? idFn.apply(doc) : null;
         if (id != null && id.isEmpty()) {
-            throw new IllegalArgumentException("idFn returned an empty _id");
+            throw new InvalidDocumentException("idFn returned an empty _id");
         }
 
         final byte[] unit;
@@ -1995,7 +2020,7 @@ public class ElasticsearchIO {
             } else if (b == '"') {
                 inString = false;
             } else if (b == '\n' || b == '\r') {
-                throw new IllegalArgumentException(
+                throw new InvalidDocumentException(
                     "Document contains unescaped CR/LF inside a JSON string literal");
             }
         }

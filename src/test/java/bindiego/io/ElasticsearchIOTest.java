@@ -1133,6 +1133,7 @@ public class ElasticsearchIOTest {
     private static ElasticsearchIO.Append.AppendFn createTestAppendFn(ElasticsearchIO.Append spec) {
         ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
         fn.initTransientState();
+        fn.concurrencySemaphore = new Semaphore(spec.getMaxConcurrentRequests());
         fn.startBundle(null);
         return fn;
     }
@@ -1504,15 +1505,15 @@ public class ElasticsearchIOTest {
         assertEquals("", lines[2]);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test(expected = ElasticsearchIO.InvalidDocumentException.class)
     public void buildBulkUnit_rawNewlineInsideJsonString_throwsInsteadOfMutatingValue() throws Exception {
         String invalidJson = "{\"msg\":\"hello\nworld\"}";
         byte[] utf8 = invalidJson.getBytes(StandardCharsets.UTF_8);
         ElasticsearchIO.buildBulkUnit(invalidJson, utf8, utf8.length, null);
     }
 
-    @Test(expected = IllegalArgumentException.class)
-    public void buildBulkUnit_emptyId_throwsIllegalArgumentException() throws Exception {
+    @Test(expected = ElasticsearchIO.InvalidDocumentException.class)
+    public void buildBulkUnit_emptyId_throwsInvalidDocumentException() throws Exception {
         String doc = "{\"a\":1}";
         byte[] utf8 = doc.getBytes(StandardCharsets.UTF_8);
         ElasticsearchIO.buildBulkUnit(doc, utf8, utf8.length, d -> "");
@@ -1564,6 +1565,16 @@ public class ElasticsearchIOTest {
             1L, fn.asyncDocsFailedNonRetryable.sum());
         assertTrue("totalErrors must increment when idFn returns empty _id",
             ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 1L);
+    }
+
+    @Test(expected = NumberFormatException.class)
+    public void processElement_idFnThrowsNumberFormatException_propagatesInsteadOfDroppingDocument() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> {
+            throw new NumberFormatException("bad numeric id in user idFn");
+        });
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+
+        fn.processElement(mockProcessContext("{\"a\":1}"));
     }
 
     @Test
