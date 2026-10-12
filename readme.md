@@ -14,16 +14,16 @@ beam代码理论上可以驱动spark，flink等等流式框架，详情参考[�
 
 ### Proposed streaming pipeline
 
-#### IMPORTANT: in the sample code, assume the pubsub message is json text encoded in utf-8
+#### IMPORTANT: in the sample code, the full pipeline (`isBasic=false`) assumes the Pub/Sub message is UTF-8 encoded CSV (`event_ts,thread_id,thread_name,seq,dim1,metrics1`), whereas Basic Mode (`isBasic=true`) assumes UTF-8 encoded JSON
 
-pubsub/kafka -> dataflow/flink -> join dimesion table -> data processing (realtime calculation + data warehouse ingestion + back files) -> GCS(avro, csv for both data & deadleter) + BigQuery + HBase/Bigtable (realtime analysis) + Elasticsearch
+pubsub/kafka -> dataflow/flink -> join dimension table -> data processing (realtime calculation + data warehouse ingestion + back files) -> GCS(avro, csv for both data & deadletter) + BigQuery + HBase/Bigtable (realtime analysis) + Elasticsearch
 
 #### Current pipeline DAG
 ![](https://raw.githubusercontent.com/cloudymoma/raycom/streaming/miscs/pipeline_dag.png)
 
 - Data consumption from message queue (Pubsub / Kafka)
-- Raw data *join* dimension table, MySQL & fit in memroy
-- Windowed data really time aggregation then ingest into Bigtable / Hbase
+- Raw data *join* dimension table, MySQL & fit in memory
+- Windowed data real-time aggregation then ingest into Bigtable / Hbase
 - Hot data ingest into Elasticsearch for realtime analysis
 - Ingest into data warehouse (BigQuery) for big data analysis
 - Data backup into files (Avro + CSV)
@@ -36,9 +36,9 @@ We have a dedicated [branch](https://github.com/cloudymoma/raycom/tree/gcp-lb-lo
 
 Basic mode is a simplified real time data pipeline sample created for Firebase/GA users as a quickstart.
 
-All you need to do is set the `isBasic` flag to `true` in one of those [runtime parameters](https://github.com/cloudymoma/raycom/blob/streaming/makefile#L25).
+All you need to do is ensure the `isBasic` flag is set to `true` (the default) in the [runtime parameters](https://github.com/cloudymoma/raycom/blob/streaming/makefile#L25).
 
-Once the flag in on, the pipeline is simple as
+Once the flag is on, the pipeline is simple as
 
 events data -> Pubsub -> Dataflow -> BigQuery
 
@@ -48,10 +48,10 @@ I have tested pub/sub data across regions, TW & US, usually the data will be ava
 
 ##### When to consider this solution
 
-- Firebase / GA native pipeline may have a delay up to [48 hours](https://firebase.google.com/docs/perf-mon/bigquery-export#enable_export)
+- Firebase / GA native pipeline may have a delay up to [48 hours](https://firebase.google.com/docs/projects/bigquery-export)
 - Very occasional data losses, and it's hard to pinpoint the causation or fix it
 - Limited number of messages per day
-- Streaming inserts cost, this pipeline can run as batch jobs and [insert data through BigQuery Storage API](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#LL1045C79-L1045C79)
+- Streaming inserts cost: while the pipeline always runs in streaming mode (`--streaming=true`), setting `bqWriteMethod := fileloads` (the default in `makefile`) uses [`BigQueryIO.Write.Method.FILE_LOADS`](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#L1018-L1034) with a 5-minute triggering frequency instead of [`STREAMING_INSERTS`](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#L1035-L1056) (`bqWriteMethod := streaming`)
 
 ##### Hints
 
@@ -63,21 +63,21 @@ I have tested pub/sub data across regions, TW & US, usually the data will be ava
 
 #### Quickstart 快速开始
 
-##### Prerequisits
+##### Prerequisites
 
 Java dev environment
-- JDK8+
+- JDK 11+
 - Maven
 
 ##### Dimension table in MySQL 维度表，这里用MySQL，假设可以全部加载到内存以分发到所有worker
 
 项目里提供了初始化脚本 `scripts/dim1.sql` 维表更新的话直接`update`整个管道就可以了，如果维表需要LRU策略保留在内存，目前还没有办法。
 
-You could use [this](https://github.com/bindiego/raycom/blob/streaming/scripts/dim1.sql) script to init the MySQL if you use [gcpplayground](https://github.com/bindiego/gcpplayground) to generate your messages. Also, you could simply use [this init script](https://github.com/bindiego/local_services/tree/develop/mysql) to run a MySQL instance in [Docker](https://github.com/bindiego/local_services/tree/develop/docker). 
+You could use [scripts/dim1.sql](scripts/dim1.sql) to init the MySQL if you use [gcpplayground](https://github.com/cloudymoma/gcpplayground) to generate your messages. Also, you could simply use [this init script](https://github.com/bindiego/local_services/tree/develop/mysql) to run a MySQL instance in [Docker](https://github.com/bindiego/local_services/tree/develop/docker). 
 
 ##### Bigtable init 初始化Bigtable，可以用HBase代替
 
-You could use `make` to initialize the Bigtable enviroment. Adjust the parameters in `makefile` accordingly, e.g. cluster name, region etc.
+You could use `make` to initialize the Bigtable environment. Adjust the parameters in `makefile` accordingly, e.g. cluster name, region etc.
 
 Create Bigtable cluster, run it once. 拉起一个Bigtable集群实例。
 
@@ -95,7 +95,7 @@ Following steps are **optional** but you may need to plan ahead for best practic
 
 - Create an ES [index template](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-templates.html), so created index will share the same attributes (settings, mappings etc.)
 - Create a Kibana index pattern for query those indices
-- Create an ES index alias for ingestion, then rollover manualy or automatically
+- Create an ES index alias for ingestion, then rollover manually or automatically
 
 You could use the following scripts for above purposes, but remember to modify the `init.sh` accordingly for connection parameters.
 
@@ -120,7 +120,7 @@ cd scripts/elastic
 ./init.sh
 ```
 
-Finally, you may want to ingest data into different indices on a time basis, like hourly, daily or monthly. This could be controlled by using [Index alias](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-add-alias.html). So your dataflow job can only specify the name of the alias on start. [Curator](https://www.elastic.co/guide/en/elasticsearch/client/curator/5.8/alias.html) is the tool can automate this process or schedule your own jobs.
+Finally, you may want to ingest data into different indices on a time basis, like hourly, daily or monthly. This could be controlled by using [Index alias](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-add-alias.html). So your dataflow job can only specify the name of the alias on start. You can use native Index Lifecycle Management (ILM, shown below) or [Curator](https://www.elastic.co/guide/en/elasticsearch/client/curator/current/index.html) to automate this process.
 
 Let's do this manually in the Kibana **Dev Tools** UI
 
@@ -222,15 +222,35 @@ Other out of scope topics on Elastic best practices,
 
 ##### Run the pipeline
 
-This branch is focusing on streaming, so the sample subscribes messages from Pubsub. It's easy to switch to KafkaIO in beam. But the quickest way to produce some dummy data then send to Pubsub for fun is by using [this](https://github.com/bindiego/gcpplayground) project.
+This branch is focusing on streaming, so the sample subscribes messages from Pubsub. It's easy to switch to KafkaIO in beam. But the quickest way to produce some dummy data then send to Pubsub for fun is by using [this](https://github.com/cloudymoma/gcpplayground) project.
 
-If you use the [GCP Play Ground](https://github.com/bindiego/gcpplayground) to produce the pubsub message, there isn't much to do. Simply update the `run` shell script, make sure you have the corresponding permissions to manipulate the GCP resources.
+If you use the [GCP Play Ground](https://github.com/cloudymoma/gcpplayground) to produce the pubsub message, there isn't much to do. Simply update the parameters in `makefile` and make sure you have the corresponding permissions to manipulate the GCP resources.
 
-Double check the paramters passed to the job trigger in `makefile`, then,
+- **Basic Mode (default in `makefile`):** `isBasic := true` and `bq_firebase_schema := bq_firebase.json` are set by default.
+- **Full Pipeline Mode:** To run the full DAG (MySQL lookup + Bigtable + Elasticsearch + GCS CSV/Avro + BigQuery), update `makefile`:
+  1. Set `isBasic := false`
+  2. Set `bq_firebase_schema := dingoactions.json` (so `make gcs_init` uploads `schemas/dingoactions.json` and `--bqSchema` points to it)
+  3. Update `--bqOutputTable` (e.g. `$(gcp_project):raycom.dingoactions`) and `pubsub_topic` / `pubsub_sub` to a topic carrying CSV messages
+- **Elasticsearch options (`--es*`):** Configured in `makefile` via `--esHost` (supports a single URL or comma-separated node URLs), `--esUser`, `--esPass`, `--esIndex`, `--esMaxBatchSize`, `--esMaxBatchBytes`, `--esNumThread`, and `--esIsIgnoreInsecureSSL`.
+
+Double check the parameters passed to the job trigger in `makefile`, then:
 
 ```
 make df
 ```
+
+###### `makefile` targets
+
+| Target | Description |
+| --- | --- |
+| `make build` / `make clean` | Compile or clean the Maven project |
+| `make pubsub_init` | Create the Pub/Sub topic and subscription |
+| `make gcs_init` | Create the GCS bucket and upload the BigQuery and Avro schema files |
+| `make bq_init` | Create the `raycom` BigQuery dataset |
+| `make btcluster` / `make btinit` | Create the Bigtable instance and initialize `bttall` and `btwide` tables |
+| `make btdata` / `make btclear` / `make btrelease` | Read sample rows, delete tables, or delete the Bigtable instance |
+| `make df` / `make dfup` | Launch a new Dataflow job or update an existing running job (`--update`) |
+| `make drain` / `make cancel` | Drain or cancel the Dataflow job |
 
 ##### Caveats
 
