@@ -93,11 +93,14 @@ dfup: build
 df: build
 	@$(call run_dataflow,)
 
+# gcloud cancel/drain take a JOB_ID, not a job name, so look up the active job's ID by name
+active_job_id = $$(gcloud dataflow jobs list --region=$(region) --status=active --filter="name=$(job)-$(strip $(bqWriteMethod))" --format="value(id)")
+
 cancel:
-	@gcloud dataflow jobs cancel $(job)-$(bqWriteMethod) --region=$(region)
+	@gcloud dataflow jobs cancel $(active_job_id) --region=$(region)
 
 drain:
-	@gcloud dataflow jobs drain $(job)-$(bqWriteMethod) --region=$(region)
+	@gcloud dataflow jobs drain $(active_job_id) --region=$(region)
 
 btcluster:
 	@cbt createinstance $(bigtable_instance) "Bigbase" bigbaby $(region)-a 1 SSD

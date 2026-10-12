@@ -51,7 +51,7 @@ I have tested pub/sub data across regions, TW & US, usually the data will be ava
 - Firebase / GA native pipeline may have a delay up to [48 hours](https://firebase.google.com/docs/projects/bigquery-export)
 - Very occasional data losses, and it's hard to pinpoint the causation or fix it
 - Limited number of messages per day
-- Streaming inserts cost: while the pipeline always runs in streaming mode (`--streaming=true`), setting `bqWriteMethod := fileloads` (the default in `makefile`) uses [`BigQueryIO.Write.Method.FILE_LOADS`](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#L1018-L1034) with a 5-minute triggering frequency instead of [`STREAMING_INSERTS`](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#L1035-L1056) (`bqWriteMethod := streaming`)
+- Streaming inserts cost: while the pipeline always runs in streaming mode (`--streaming=true`), setting `bqWriteMethod := fileloads` (the default in `makefile`) uses [`BigQueryIO.Write.Method.FILE_LOADS`](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#L1018-L1034) with a 5-minute triggering frequency instead of [`STREAMING_INSERTS`](https://github.com/cloudymoma/raycom/blob/streaming/src/main/java/bindiego/BindiegoStreaming.java#L1035-L1055) (`bqWriteMethod := streaming`)
 
 ##### Hints
 
@@ -230,7 +230,7 @@ If you use the [GCP Play Ground](https://github.com/cloudymoma/gcpplayground) to
 - **Full Pipeline Mode:** To run the full DAG (MySQL lookup + Bigtable + Elasticsearch + GCS CSV/Avro + BigQuery), update `makefile`:
   1. Set `isBasic := false`
   2. Set `bq_firebase_schema := dingoactions.json` (so `make gcs_init` uploads `schemas/dingoactions.json` and `--bqSchema` points to it)
-  3. Update `--bqOutputTable` (e.g. `$(gcp_project):raycom.dingoactions`) and `pubsub_topic` / `pubsub_sub` to a topic carrying CSV messages
+  3. Update `--bqOutputTable` in the `run_dataflow` block (e.g. `$(gcp_project):raycom.dingoactions`) and `pubsub_topic` / `pubsub_sub` to a topic carrying CSV messages
 - **Elasticsearch options (`--es*`):** Configured in `makefile` via `--esHost` (supports a single URL or comma-separated node URLs), `--esUser`, `--esPass`, `--esIndex`, `--esMaxBatchSize`, `--esMaxBatchBytes`, `--esNumThread`, and `--esIsIgnoreInsecureSSL`.
 
 Double check the parameters passed to the job trigger in `makefile`, then:
