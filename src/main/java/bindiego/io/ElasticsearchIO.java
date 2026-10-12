@@ -487,10 +487,13 @@ public class ElasticsearchIO {
                         String keystorePassword = getKeystorePassword();
                         keyStore.load(is, (keystorePassword == null) ? null : keystorePassword.toCharArray());
                     }
-                    final TrustStrategy trustStrategy =
-                        isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
+                    // Always pass null as the TrustStrategy when a keystore is provided:
+                    // a keystore holding the cluster's self-signed certificate or CA
+                    // already trusts it via standard JSSE X509TrustManager, whereas passing
+                    // TrustSelfSignedStrategy causes TrustManagerDelegate to accept ANY
+                    // 1-certificate chain before consulting the keystore (MITM vulnerability).
                     customSslContext =
-                        SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
+                        SSLContexts.custom().loadTrustMaterial(keyStore, (TrustStrategy) null).build();
                     customSessionStrategy = new SSLIOSessionStrategy(customSslContext);
                 } catch (Exception e) {
                     throw new IOException("Can't load the client certificate from the keystore", e);
@@ -1150,19 +1153,24 @@ public class ElasticsearchIO {
                 }
 
                 // Single-pass construction + validation: buildBulkUnit resolves idFn
-                // (rejecting empty _id) and compacts inter-token newlines while rejecting
-                // unescaped CR/LF inside JSON string literals via InvalidDocumentException.
-                // Catching only InvalidDocumentException ensures exceptions thrown by user
-                // idFn code (e.g. NumberFormatException / IllegalArgumentException) still
-                // propagate and fail the bundle instead of silently dropping documents.
+                // (catching RuntimeException around idFn.apply(doc) only, and rejecting
+                // empty _id) and compacts inter-token newlines while rejecting unescaped
+                // CR/LF inside JSON string literals via InvalidDocumentException.
+                // Catching only InvalidDocumentException ensures Errors (e.g. OutOfMemoryError)
+                // and unexpected exceptions outside idFn still fail the bundle.
                 final byte[] unit;
                 try {
                     unit = buildBulkUnit(doc, docUtf8, docLen, spec.getIdFn());
                 } catch (InvalidDocumentException e) {
                     totalErrors.increment();
                     asyncDocsFailedNonRetryable.increment();
-                    logger.error("Invalid document in ElasticsearchIO.AppendFn ({}) — skipping.",
-                        e.getMessage());
+                    if (e.getCause() != null) {
+                        logger.error("Invalid document in ElasticsearchIO.AppendFn ({}) — skipping.",
+                            e.getMessage(), e.getCause());
+                    } else {
+                        logger.error("Invalid document in ElasticsearchIO.AppendFn ({}) — skipping.",
+                            e.getMessage());
+                    }
                     return;
                 }
 
@@ -1979,19 +1987,23 @@ public class ElasticsearchIO {
     }
 
     /**
-     * Dedicated unchecked exception for deterministic document/ID validation failures
-     * (empty {@code _id} or unescaped CR/LF inside a JSON string literal).
+     * Dedicated unchecked exception for deterministic per-document validation failures
+     * (empty {@code _id}, {@link RuntimeException} thrown by {@code idFn.apply(doc)},
+     * or unescaped CR/LF inside a JSON string literal).
      *
      * <p>Deliberately extends {@link RuntimeException} directly rather than
      * {@link IllegalArgumentException} so {@link Append.AppendFn#processElement}
-     * never mistakes an {@link IllegalArgumentException} (such as
-     * {@link NumberFormatException} or {@code Preconditions.checkArgument}) thrown
-     * by user-supplied {@code idFn} code for a non-retryable document skip.
+     * only skips documents for explicitly wrapped validation failures while allowing
+     * {@link Error}s and unexpected bugs in our own code to fail the bundle.
      */
     @VisibleForTesting
     static final class InvalidDocumentException extends RuntimeException {
         InvalidDocumentException(String message) {
             super(message);
+        }
+
+        InvalidDocumentException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 
@@ -2003,7 +2015,8 @@ public class ElasticsearchIO {
      * {@code _id} encoded directly to UTF-8 bytes via {@link ObjectMapper#writeValueAsBytes}
      * (avoiding intermediate String allocations) so HTTP-level resends and Beam bundle
      * retries overwrite the same document instead of duplicating it under a fresh auto-id.
-     * An empty {@code _id} ({@code ""}) is rejected with {@link InvalidDocumentException}.
+     * A {@link RuntimeException} thrown by {@code idFn.apply(doc)} or an empty {@code _id}
+     * ({@code ""}) is rejected with {@link InvalidDocumentException}.
      *
      * <p>Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between tokens
      * (outside string literals): inter-token {@code '\r'} / {@code '\n'} are replaced
@@ -2017,7 +2030,16 @@ public class ElasticsearchIO {
             byte[] docUtf8,
             int docLen,
             @Nullable SerializableFunction<String, String> idFn) throws IOException {
-        String id = idFn != null ? idFn.apply(doc) : null;
+        final String id;
+        if (idFn != null) {
+            try {
+                id = idFn.apply(doc);
+            } catch (RuntimeException e) {
+                throw new InvalidDocumentException("idFn threw an exception: " + e.getMessage(), e);
+            }
+        } else {
+            id = null;
+        }
         if (id != null && id.isEmpty()) {
             throw new InvalidDocumentException("idFn returned an empty _id");
         }

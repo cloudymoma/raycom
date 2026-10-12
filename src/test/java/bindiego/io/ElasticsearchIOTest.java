@@ -1567,10 +1567,32 @@ public class ElasticsearchIOTest {
             ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 1L);
     }
 
-    @Test(expected = NumberFormatException.class)
-    public void processElement_idFnThrowsNumberFormatException_propagatesInsteadOfDroppingDocument() throws Exception {
+    @Test
+    public void processElement_idFnThrowsRuntimeException_rejectedAndCountedWithoutFailingBundle() throws Exception {
         ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> {
-            throw new NumberFormatException("bad numeric id in user idFn");
+            if (doc.contains("bad")) {
+                throw new NumberFormatException("bad numeric id in user idFn");
+            }
+            return "doc-ok";
+        });
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext("{\"id\":\"bad\"}"));
+        fn.processElement(mockProcessContext("{\"id\":\"42\"}"));
+
+        assertEquals("idFn RuntimeException must be counted in asyncDocsFailedNonRetryable",
+            1L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment when idFn throws RuntimeException",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 1L);
+        assertEquals("Subsequent valid document in the same bundle must still be batched",
+            1, fn.batch.size());
+    }
+
+    @Test(expected = AssertionError.class)
+    public void processElement_idFnThrowsError_propagatesAndFailsBundle() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> {
+            throw new AssertionError("fatal error in idFn");
         });
         ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
 
@@ -1750,6 +1772,199 @@ public class ElasticsearchIOTest {
             } finally {
                 System.clearProperty("ENVIRONMENT");
             }
+        }
+    }
+
+    private static final String TEST_SELF_SIGNED_SERVER_P12_BASE64 =
+        "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"
+        + "AicQ";
+
+    private static final String TEST_OTHER_CLUSTER_CERT_BASE64 =
+        "MIIC6TCCAdGgAwIBAgIECrkIzzANBgkqhkiG9w0BAQsFADAkMSIwIAYDVQQDExlvdGhlci1jbHVz"
+        + "dGVyLmV4YW1wbGUuY29tMCAXDTI2MTAxMjAxMTA1MVoYDzIxMjYwOTE4MDExMDUxWjAkMSIwIAYD"
+        + "VQQDExlvdGhlci1jbHVzdGVyLmV4YW1wbGUuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB"
+        + "CgKCAQEAh/JA0GiRbepfq/EFQNzoCpN2Lq4oKNE0ZBJuZlR7l6O3CztzUsbg5eW+s6D+KVZTgmyX"
+        + "MNbR0h6y3vbmhKtT1/oYApgjd8kBf4OXUkfrOeHGWlp2tNuhjV0iRZJ3KBg9YIR7vKFVMLdCyBr7"
+        + "WJSLOB+v3utQ2UNfBu4Q9jU1fjwTiPQPqeTYsVoVDBGQAKc5T/VtiLuQhH7gSJWldMIJ+mwU+lX2"
+        + "seDAE4zW9oWRNz7pwx+vlqao06rWMWd4H3zzCmJba9T7XJc/Ud73wSs+G2FqTv5wWbseqe+FZZto"
+        + "uRkYv0c34dCTXhRkKSvievXu7NgsbOmVwSPAHn0JcwqjeQIDAQABoyEwHzAdBgNVHQ4EFgQUwe3k"
+        + "DfD6U93jmD6RRDPdi7yOUhwwDQYJKoZIhvcNAQELBQADggEBAHMVzWfL/CKeq5YSRDk2fVzczzry"
+        + "qv3gWZMqiQeLYOurRLRZh0UJYqj94aB7kQ5M2ufI4bVH7Y7+De/uvkTnRHoOd6vdpmZPfdlEJHod"
+        + "vnbkFl5voVk8iQmtwXrTACEG8bgc10LiX7deT0IVHfaVy1EDly8MuN38WmoJc5lgi5/mX/wqOx5+"
+        + "9wKz7UX3TY5Lhpuh3ZJUd6ooMMvpg4BcFdgEPYGS+BnQu2vp5v8WABevXgtgvbocAJ26JdmA8AVz"
+        + "bSvKY56JKPghgxGLxnXNt6cvhZg70RSGuYjt8BAi7N+o2EoxG+LQ+BxWaZzC6GbFytDERQ18vIqM"
+        + "CnlM2cuXQP4=";
+
+    private static void verifyServerCertificateHandshake(
+            javax.net.ssl.SSLContext clientSslContext,
+            javax.net.ssl.SSLContext serverSslContext) throws javax.net.ssl.SSLException {
+        javax.net.ssl.SSLEngine clientEngine = clientSslContext.createSSLEngine("es.example.com", 9200);
+        clientEngine.setUseClientMode(true);
+        clientEngine.setEnabledProtocols(new String[] { "TLSv1.2" });
+
+        javax.net.ssl.SSLEngine serverEngine = serverSslContext.createSSLEngine();
+        serverEngine.setUseClientMode(false);
+        serverEngine.setEnabledProtocols(new String[] { "TLSv1.2" });
+
+        java.nio.ByteBuffer c2s = java.nio.ByteBuffer.allocate(32768);
+        java.nio.ByteBuffer s2c = java.nio.ByteBuffer.allocate(32768);
+        java.nio.ByteBuffer empty = java.nio.ByteBuffer.allocate(0);
+        java.nio.ByteBuffer sink = java.nio.ByteBuffer.allocate(32768);
+
+        // 1. ClientHello -> Server
+        clientEngine.wrap(empty, c2s);
+        c2s.flip();
+        serverEngine.unwrap(c2s, sink);
+        Runnable task;
+        while ((task = serverEngine.getDelegatedTask()) != null) {
+            task.run();
+        }
+        // 2. ServerHello + Certificate -> Client (triggers X509TrustManager.checkServerTrusted)
+        serverEngine.wrap(empty, s2c);
+        s2c.flip();
+        clientEngine.unwrap(s2c, sink);
+        while ((task = clientEngine.getDelegatedTask()) != null) {
+            task.run();
+        }
+        c2s.clear();
+        clientEngine.wrap(empty, c2s);
+    }
+
+    @Test
+    public void createClientBuilder_keystoreWithTrustSelfSignedCerts_doesNotBypassKeystoreWithTrustSelfSignedStrategy()
+            throws Exception {
+        // When keystorePath is configured, loadTrustMaterial must NOT install
+        // TrustSelfSignedStrategy even if trustSelfSignedCerts is true:
+        // TrustManagerDelegate checks TrustStrategy BEFORE the keystore's X509TrustManager,
+        // so TrustSelfSignedStrategy accepts ANY 1-cert chain and never consults the keystore.
+        byte[] p12Bytes = java.util.Base64.getDecoder().decode(TEST_SELF_SIGNED_SERVER_P12_BASE64);
+        java.security.KeyStore serverKs = java.security.KeyStore.getInstance("PKCS12");
+        serverKs.load(new java.io.ByteArrayInputStream(p12Bytes), "secret".toCharArray());
+        javax.net.ssl.KeyManagerFactory kmf = javax.net.ssl.KeyManagerFactory.getInstance(
+            javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(serverKs, "secret".toCharArray());
+        javax.net.ssl.SSLContext serverSslContext = javax.net.ssl.SSLContext.getInstance("TLSv1.2");
+        serverSslContext.init(kmf.getKeyManagers(), null, null);
+
+        byte[] otherCertBytes = java.util.Base64.getDecoder().decode(TEST_OTHER_CLUSTER_CERT_BASE64);
+        java.security.cert.Certificate otherClusterCert =
+            java.security.cert.CertificateFactory.getInstance("X.509")
+                .generateCertificate(new java.io.ByteArrayInputStream(otherCertBytes));
+
+        java.lang.reflect.Field callbackField =
+            org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
+        callbackField.setAccessible(true);
+        java.lang.reflect.Field sslContextField =
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslcontext");
+        sslContextField.setAccessible(true);
+
+        java.io.File unpinnedKeystoreFile = java.io.File.createTempFile("es-unpinned-truststore-", ".jks");
+        java.io.File pinnedKeystoreFile = java.io.File.createTempFile("es-pinned-truststore-", ".jks");
+        unpinnedKeystoreFile.deleteOnExit();
+        pinnedKeystoreFile.deleteOnExit();
+        try {
+            // Case 1: Keystore pins a different cert + trustSelfSignedCerts(true).
+            // A MITM presenting an unpinned self-signed cert MUST be rejected with SSLHandshakeException.
+            java.security.KeyStore unpinnedKs = java.security.KeyStore.getInstance("jks");
+            unpinnedKs.load(null, "secret".toCharArray());
+            unpinnedKs.setCertificateEntry("other-cluster", otherClusterCert);
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(unpinnedKeystoreFile)) {
+                unpinnedKs.store(fos, "secret".toCharArray());
+            }
+
+            ElasticsearchIO.ConnectionConf unpinnedConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withKeystorePath(unpinnedKeystoreFile.getAbsolutePath())
+                .withKeystorePassword("secret")
+                .withTrustSelfSignedCerts(true);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback unpinnedCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(unpinnedConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder unpinnedHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            unpinnedCallback.customizeHttpClient(unpinnedHttpBuilder);
+            javax.net.ssl.SSLContext unpinnedClientSsl =
+                (javax.net.ssl.SSLContext) sslContextField.get(unpinnedHttpBuilder);
+            assertNotNull(unpinnedClientSsl);
+
+            try {
+                verifyServerCertificateHandshake(unpinnedClientSsl, serverSslContext);
+                fail("Expected SSLHandshakeException when server self-signed cert is not in keystorePath");
+            } catch (javax.net.ssl.SSLHandshakeException expected) {
+                // Expected: keystore was consulted and rejected the unpinned self-signed certificate
+            }
+
+            // Case 2: Keystore containing the cluster's self-signed cert MUST trust it with TrustStrategy=null
+            java.security.KeyStore pinnedKs = java.security.KeyStore.getInstance("jks");
+            pinnedKs.load(null, "secret".toCharArray());
+            pinnedKs.setCertificateEntry("es-cluster", serverKs.getCertificate("server"));
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(pinnedKeystoreFile)) {
+                pinnedKs.store(fos, "secret".toCharArray());
+            }
+
+            ElasticsearchIO.ConnectionConf pinnedConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withKeystorePath(pinnedKeystoreFile.getAbsolutePath())
+                .withKeystorePassword("secret")
+                .withTrustSelfSignedCerts(false);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback pinnedCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(pinnedConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder pinnedHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            pinnedCallback.customizeHttpClient(pinnedHttpBuilder);
+            javax.net.ssl.SSLContext pinnedClientSsl =
+                (javax.net.ssl.SSLContext) sslContextField.get(pinnedHttpBuilder);
+            assertNotNull(pinnedClientSsl);
+
+            verifyServerCertificateHandshake(pinnedClientSsl, serverSslContext);
+        } finally {
+            unpinnedKeystoreFile.delete();
+            pinnedKeystoreFile.delete();
         }
     }
 
