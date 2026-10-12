@@ -1125,4 +1125,875 @@ public class ElasticsearchIOTest {
         assertNotEquals("Different schemes should produce different pool keys",
             conf1.getPoolKey(), conf2.getPoolKey());
     }
+
+    // =========================================================================
+    // Bundle Fault-Tolerance & Concurrent Flush Safety Tests
+    // =========================================================================
+
+    private static ElasticsearchIO.Append.AppendFn createTestAppendFn(ElasticsearchIO.Append spec) {
+        ElasticsearchIO.Append.AppendFn fn = new ElasticsearchIO.Append.AppendFn(spec);
+        fn.initTransientState();
+        fn.concurrencySemaphore = new Semaphore(spec.getMaxConcurrentRequests());
+        fn.startBundle(null);
+        return fn;
+    }
+
+    private static ElasticsearchIO.Append.AppendFn.ProcessContext mockProcessContext(String element) {
+        ElasticsearchIO.Append.AppendFn.ProcessContext ctx =
+            org.mockito.Mockito.mock(ElasticsearchIO.Append.AppendFn.ProcessContext.class);
+        org.mockito.Mockito.when(ctx.element()).thenReturn(element);
+        return ctx;
+    }
+
+    @Test
+    public void waitForPendingOperations_removeAllPreservesConcurrentlyAddedFutures() throws Exception {
+        // Exercises AppendFn.waitForPendingOperations() directly: while allOf(futures).get()
+        // is blocked awaiting f1, a concurrent thread registers f2 in pendingOperations and
+        // then completes f1. waitForPendingOperations() must remove only f1 and preserve f2.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+
+        CompletableFuture<Void> f1 = new CompletableFuture<>();
+        CompletableFuture<Void> f2 = new CompletableFuture<>();
+        fn.pendingOperations.add(f1);
+
+        Thread concurrentTick = new Thread(() -> {
+            try {
+                Thread.sleep(30);
+                fn.pendingOperations.add(f2);
+                f1.complete(null);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        concurrentTick.start();
+
+        fn.waitForPendingOperations();
+        concurrentTick.join(5000);
+
+        assertEquals("Concurrently added future f2 must remain in fn.pendingOperations",
+            1, fn.pendingOperations.size());
+        assertSame("f2 must be preserved for the next quiescence pass",
+            f2, fn.pendingOperations.peek());
+    }
+
+    @Test
+    public void bundleScopedFailureCell_lateFailureFromAbortedBundleDoesNotPoisonNextBundle() throws Exception {
+        // Exercises AppendFn.startBundle() and AppendFn.waitForPendingOperations() directly:
+        // Bundle 1 flushes a batch whose future fails AFTER Bundle 2's startBundle() has run.
+        // Bundle 2's waitForPendingOperations() must not throw because startBundle() allocated
+        // fresh pendingOperations and firstAsyncFailure instances for Bundle 2.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        fn.concurrencySemaphore = new Semaphore(2);
+
+        CountDownLatch allowBundle1TaskToFail = new CountDownLatch(1);
+        ExecutorService testExecutor = Executors.newSingleThreadExecutor();
+        try {
+            fn.ioExecutor = testExecutor;
+
+            // Bundle 1 flushes a non-empty batch
+            AtomicReference<Throwable> bundle1FailureRef = fn.firstAsyncFailure;
+            fn.batch.add("{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
+            fn.currentBatchSizeBytes = 22;
+
+            // Occupy the single executor thread until Bundle 2 has started
+            testExecutor.submit(() -> {
+                try {
+                    allowBundle1TaskToFail.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            fn.flushBatch(true);
+
+            // Simulate Bundle 1 aborting and Bundle 2 starting on the same DoFn instance
+            fn.startBundle(null);
+            assertNotSame("startBundle must allocate a fresh firstAsyncFailure cell per bundle",
+                bundle1FailureRef, fn.firstAsyncFailure);
+
+            // Now let Bundle 1's queued flush task run and fail (restClient is null -> NPE in processBatch)
+            allowBundle1TaskToFail.countDown();
+            long deadline = System.currentTimeMillis() + 5000;
+            while (bundle1FailureRef.get() == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10);
+            }
+            assertNotNull("Bundle 1's failure cell must capture the late failure", bundle1FailureRef.get());
+
+            // Bundle 2's waitForPendingOperations() must succeed cleanly without seeing Bundle 1's error
+            fn.waitForPendingOperations();
+        } finally {
+            testExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void closeClient_whileBatchInFlight_doesNotLeakSemaphorePermit() throws Exception {
+        // Exercises AppendFn.flushBatch() + AppendFn.closeClient() (@Teardown):
+        // If @Teardown runs while an aborted bundle's batch task is still queued on the
+        // shared ioExecutor, the task must still release its permit back to the shared
+        // semaphore and must not NPE on byteBufferPool or concurrencySemaphore.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+
+        Semaphore sharedSemaphore = new Semaphore(1);
+        ExecutorService sharedExecutor = Executors.newSingleThreadExecutor();
+        CountDownLatch releaseExecutor = new CountDownLatch(1);
+        try {
+            fn.concurrencySemaphore = sharedSemaphore;
+            fn.ioExecutor = sharedExecutor;
+
+            // Hold the executor thread so the flushed batch stays queued during @Teardown
+            sharedExecutor.submit(() -> {
+                try {
+                    releaseExecutor.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            fn.batch.add("{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
+            fn.currentBatchSizeBytes = 22;
+            fn.flushBatch(true);
+            assertEquals("Permit must be held while batch is queued", 0, sharedSemaphore.availablePermits());
+
+            // @Teardown runs while the batch job is still queued on sharedExecutor
+            fn.closeClient();
+            assertNotNull("byteBufferPool must not be nulled by closeClient", fn.byteBufferPool);
+
+            // Unblock the queued batch job; it will fail inside processBatch (restClient == null)
+            // and must release its semaphore permit in finally.
+            releaseExecutor.countDown();
+            assertTrue("Shared semaphore permit must be released after in-flight job finishes",
+                sharedSemaphore.tryAcquire(5, TimeUnit.SECONDS));
+            sharedSemaphore.release();
+        } finally {
+            sharedExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void flushBatch_whenExecutorOrSemaphoreNull_throwsIllegalStateException() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withPendingTimeout(10);
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        fn.batch.add("{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
+        fn.currentBatchSizeBytes = 22;
+
+        // ioExecutor is null (e.g. setup() not called or closeClient() already ran)
+        try {
+            fn.flushBatch(true);
+            fail("Expected IllegalStateException when ioExecutor is null");
+        } catch (IllegalStateException expected) {
+            // expected
+        }
+
+        // concurrencySemaphore is null
+        ExecutorService testExecutor = Executors.newSingleThreadExecutor();
+        try {
+            fn.ioExecutor = testExecutor;
+            fn.concurrencySemaphore = null;
+            try {
+                fn.flushBatch(true);
+                fail("Expected IllegalStateException when concurrencySemaphore is null");
+            } catch (IllegalStateException expected) {
+                // expected
+            }
+        } finally {
+            testExecutor.shutdownNow();
+        }
+    }
+
+    // =========================================================================
+    // Bulk Response Validation & HTTP Retry Classification Tests
+    // =========================================================================
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_missingErrorsField_throwsIOException() throws Exception {
+        // Regression test: root.path("errors").asBoolean() returns false for MissingNode,
+        // which used to treat truncated or proxy-returned JSON without "errors" as 100% success.
+        String body = "{\"status\":503,\"message\":\"upstream proxy error\"}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 10);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_nonBooleanErrorsField_throwsIOException() throws Exception {
+        String body = "{\"errors\":\"true\",\"items\":[]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 10);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_errorsTrueWithoutItemsArray_throwsIOException() throws Exception {
+        String body = "{\"took\":5,\"errors\":true}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 10);
+    }
+
+    @Test
+    public void isRetryableHttpStatus_classifiesStatusCodesCorrectly() {
+        // Retryable HTTP statuses: 408 Request Timeout, 429 Too Many Requests, 500/502/503/504
+        for (int retryable : new int[]{408, 429, 500, 502, 503, 504}) {
+            assertTrue("HTTP " + retryable + " must be retryable",
+                ElasticsearchIO.isRetryableHttpStatus(retryable));
+        }
+
+        // Non-retryable HTTP client/server statuses: 400 Bad Request, 401 Unauthorized,
+        // 403 Forbidden, 404 Not Found, 409 Conflict, 413 Payload Too Large, 501 Not Implemented
+        for (int nonRetryable : new int[]{400, 401, 403, 404, 409, 413, 501}) {
+            assertFalse("HTTP " + nonRetryable + " must NOT be retryable",
+                ElasticsearchIO.isRetryableHttpStatus(nonRetryable));
+        }
+    }
+
+    @Test
+    public void executeWithRetry_malformed2xxBulkResponse_doesNotResendBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append()
+            .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
+            .withRetryConf(ElasticsearchIO.RetryConf.create(3, org.joda.time.Duration.standardMinutes(1)));
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        fn.retryBackoff = org.apache.beam.sdk.util.FluentBackoff.DEFAULT
+            .withInitialBackoff(org.joda.time.Duration.millis(1))
+            .withMaxRetries(2);
+
+        org.elasticsearch.client.RestClient mockClient =
+            org.mockito.Mockito.mock(org.elasticsearch.client.RestClient.class);
+        org.elasticsearch.client.Response mockResponse =
+            org.mockito.Mockito.mock(org.elasticsearch.client.Response.class);
+        String malformedBody = "{\"status\":503,\"message\":\"missing errors field\"}";
+        HttpEntity entity = new ByteArrayEntity(
+            malformedBody.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
+        org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
+            .thenReturn(mockResponse);
+        org.mockito.Mockito.when(mockResponse.getEntity()).thenReturn(entity);
+        fn.restClient = mockClient;
+
+        byte[] reqBytes = "{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8);
+        try {
+            fn.executeWithRetry(reqBytes, reqBytes.length, 1, reqBytes.length, false,
+                System.currentTimeMillis() + 60_000L);
+            fail("Expected IOException for malformed 2xx bulk response");
+        } catch (java.io.IOException expected) {
+            // expected
+        }
+
+        // Must NOT resend the batch when performRequest already returned a 2xx response
+        org.mockito.Mockito.verify(mockClient, org.mockito.Mockito.times(1))
+            .performRequest(org.mockito.Mockito.any());
+    }
+
+    @Test
+    public void executeWithRetry_http429Retries_countsEveryRejectionAttemptAsBackpressureSignal() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append()
+            .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
+            .withRetryConf(ElasticsearchIO.RetryConf.create(3, org.joda.time.Duration.standardMinutes(1)));
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        fn.retryBackoff = org.apache.beam.sdk.util.FluentBackoff.DEFAULT
+            .withInitialBackoff(org.joda.time.Duration.millis(1))
+            .withMaxRetries(2);
+
+        org.elasticsearch.client.RestClient mockClient =
+            org.mockito.Mockito.mock(org.elasticsearch.client.RestClient.class);
+        org.elasticsearch.client.Response err429Response =
+            org.mockito.Mockito.mock(org.elasticsearch.client.Response.class);
+        org.apache.http.StatusLine status429 = new org.apache.http.message.BasicStatusLine(
+            org.apache.http.HttpVersion.HTTP_1_1, 429, "Too Many Requests");
+        org.mockito.Mockito.when(err429Response.getStatusLine()).thenReturn(status429);
+        org.mockito.Mockito.when(err429Response.getRequestLine()).thenReturn(
+            new org.apache.http.message.BasicRequestLine("POST", "/test-index/_bulk", org.apache.http.HttpVersion.HTTP_1_1));
+        org.mockito.Mockito.when(err429Response.getHost()).thenReturn(new HttpHost("localhost", 9200, "http"));
+        org.elasticsearch.client.ResponseException ex429 =
+            new org.elasticsearch.client.ResponseException(err429Response);
+
+        org.elasticsearch.client.Response okResponse =
+            org.mockito.Mockito.mock(org.elasticsearch.client.Response.class);
+        String okBody = "{\"took\":1,\"errors\":false}";
+        org.mockito.Mockito.when(okResponse.getEntity()).thenReturn(
+            new ByteArrayEntity(okBody.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON));
+
+        // Case 1: two HTTP 429s followed by success on attempt 3 -> 2000 rejection events
+        // (unified per-attempt backpressure signal matching processBatchWithRetry's per-item counting)
+        org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
+        org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
+            .thenThrow(ex429)
+            .thenThrow(ex429)
+            .thenReturn(okResponse);
+        fn.restClient = mockClient;
+
+        byte[] reqBytes = "{\"index\":{}}\n{\"a\":1}\n".getBytes(StandardCharsets.UTF_8);
+        ElasticsearchIO.BulkResult result = fn.executeWithRetry(
+            reqBytes, reqBytes.length, 1000, reqBytes.length, false, System.currentTimeMillis() + 60_000L);
+        assertEquals(1000, result.successCount);
+        assertEquals("Each HTTP 429 attempt must add docCount to asyncRejected429 as a backpressure signal",
+            2000L, fn.asyncRejected429.sumThenReset());
+
+        // Case 2: all 3 attempts fail with HTTP 429 -> 3000 rejection events across 3 attempts
+        org.mockito.Mockito.reset(mockClient);
+        org.mockito.Mockito.when(mockClient.isRunning()).thenReturn(true);
+        org.mockito.Mockito.when(mockClient.performRequest(org.mockito.Mockito.any()))
+            .thenThrow(ex429);
+        try {
+            fn.executeWithRetry(
+                reqBytes, reqBytes.length, 1000, reqBytes.length, false, System.currentTimeMillis() + 60_000L);
+            fail("Expected IOException after exhausting HTTP 429 retries");
+        } catch (java.io.IOException expected) {
+            // expected
+        }
+        assertEquals("All 3 rejected HTTP 429 attempts must be counted in asyncRejected429",
+            3000L, fn.asyncRejected429.sum());
+    }
+
+    // =========================================================================
+    // NDJSON Sanitization, Single-Pass Bulk Unit & processElement Validation Tests
+    // =========================================================================
+
+    @Test
+    public void trimTrailingNewlines_stripsTrailingCrAndLf() {
+        byte[] raw = "{\"a\":1}\r\n\n".getBytes(StandardCharsets.UTF_8);
+        int trimmedLen = ElasticsearchIO.trimTrailingNewlines(raw);
+        assertEquals("{\"a\":1}".length(), trimmedLen);
+    }
+
+    @Test
+    public void isBlankUtf8_detectsEmptyAndWhitespaceOnlyPayloads() {
+        byte[] empty = new byte[0];
+        assertTrue(ElasticsearchIO.isBlankUtf8(empty, 0));
+
+        byte[] spaces = "   \t\r\n ".getBytes(StandardCharsets.UTF_8);
+        assertTrue(ElasticsearchIO.isBlankUtf8(spaces, spaces.length));
+
+        byte[] validJson = "{\"a\":1}".getBytes(StandardCharsets.UTF_8);
+        assertFalse(ElasticsearchIO.isBlankUtf8(validJson, validJson.length));
+    }
+
+    @Test
+    public void buildBulkUnit_sanitizesEmbeddedNewlinesAndStripsTrailingNewlines() throws Exception {
+        String prettyDoc = "{\n  \"user\": \"alice\",\r\n  \"score\": 42\n}\r\n";
+        byte[] utf8 = prettyDoc.getBytes(StandardCharsets.UTF_8);
+        int docLen = ElasticsearchIO.trimTrailingNewlines(utf8);
+
+        byte[] unit = ElasticsearchIO.buildBulkUnit(prettyDoc, utf8, docLen, null);
+        String unitStr = new String(unit, StandardCharsets.UTF_8);
+
+        // Must be exactly two lines (action line + single-line source) ending with '\n'
+        String[] lines = unitStr.split("\n", -1);
+        assertEquals("NDJSON bulk unit must have action line, source line, and trailing empty after final \\n",
+            3, lines.length);
+        assertEquals("{\"index\":{}}", lines[0]);
+        assertFalse("Source line must not contain \\r", lines[1].contains("\r"));
+        assertEquals("", lines[2]);
+    }
+
+    @Test
+    public void buildBulkUnit_encodesDeterministicIdAndEscapesSpecialChars() throws Exception {
+        String doc = "{\"id\":\"quote\\\"and\\nnewline\",\"v\":1}";
+        byte[] utf8 = doc.getBytes(StandardCharsets.UTF_8);
+        int docLen = ElasticsearchIO.trimTrailingNewlines(utf8);
+
+        byte[] unit = ElasticsearchIO.buildBulkUnit(doc, utf8, docLen, d -> "quote\"and\nnewline");
+        String unitStr = new String(unit, StandardCharsets.UTF_8);
+
+        String[] lines = unitStr.split("\n", -1);
+        assertEquals(3, lines.length);
+        assertEquals("{\"index\":{\"_id\":\"quote\\\"and\\nnewline\"}}", lines[0]);
+        assertEquals(doc, lines[1]);
+        assertEquals("", lines[2]);
+    }
+
+    @Test(expected = ElasticsearchIO.InvalidDocumentException.class)
+    public void buildBulkUnit_rawNewlineInsideJsonString_throwsInsteadOfMutatingValue() throws Exception {
+        String invalidJson = "{\"msg\":\"hello\nworld\"}";
+        byte[] utf8 = invalidJson.getBytes(StandardCharsets.UTF_8);
+        ElasticsearchIO.buildBulkUnit(invalidJson, utf8, utf8.length, null);
+    }
+
+    @Test(expected = ElasticsearchIO.InvalidDocumentException.class)
+    public void buildBulkUnit_emptyId_throwsInvalidDocumentException() throws Exception {
+        String doc = "{\"a\":1}";
+        byte[] utf8 = doc.getBytes(StandardCharsets.UTF_8);
+        ElasticsearchIO.buildBulkUnit(doc, utf8, utf8.length, d -> "");
+    }
+
+    @Test
+    public void processElement_nullAndBlankDocuments_rejectedAndCountedWithoutAddingToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append();
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext(null));
+        fn.processElement(mockProcessContext("   \t\r\n  "));
+
+        assertTrue("Null and blank documents must not be added to batch", fn.batch.isEmpty());
+        assertEquals("Both null and blank documents must be counted in asyncDocsFailedNonRetryable",
+            2L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment for each rejected document",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 2L);
+    }
+
+    @Test
+    public void processElement_rawNewlineInsideJsonString_rejectedAndCountedWithoutAddingToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append();
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext("{\"msg\":\"line1\nline2\"}"));
+        fn.processElement(mockProcessContext("{\"msg\":\"line1\rline2\"}"));
+
+        assertTrue("Documents with raw CR/LF inside a JSON string must not be added to batch",
+            fn.batch.isEmpty());
+        assertEquals("Both invalid documents must be counted in asyncDocsFailedNonRetryable",
+            2L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment for each rejected document",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 2L);
+    }
+
+    @Test
+    public void processElement_emptyIdFromIdFn_rejectedAndCountedWithoutAddingToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> "");
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext("{\"a\":1}"));
+
+        assertTrue("Document with empty _id must not be added to batch", fn.batch.isEmpty());
+        assertEquals("Empty _id rejection must be counted in asyncDocsFailedNonRetryable",
+            1L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment when idFn returns empty _id",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 1L);
+    }
+
+    @Test
+    public void processElement_idFnThrowsRuntimeException_rejectedAndCountedWithoutFailingBundle() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> {
+            if (doc.contains("bad")) {
+                throw new NumberFormatException("bad numeric id in user idFn");
+            }
+            return "doc-ok";
+        });
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+        long errorsBefore = ElasticsearchIO.getMetrics().get("totalErrors");
+
+        fn.processElement(mockProcessContext("{\"id\":\"bad\"}"));
+        fn.processElement(mockProcessContext("{\"id\":\"42\"}"));
+
+        assertEquals("idFn RuntimeException must be counted in asyncDocsFailedNonRetryable",
+            1L, fn.asyncDocsFailedNonRetryable.sum());
+        assertTrue("totalErrors must increment when idFn throws RuntimeException",
+            ElasticsearchIO.getMetrics().get("totalErrors") >= errorsBefore + 1L);
+        assertEquals("Subsequent valid document in the same bundle must still be batched",
+            1, fn.batch.size());
+    }
+
+    @Test(expected = AssertionError.class)
+    public void processElement_idFnThrowsError_propagatesAndFailsBundle() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> {
+            throw new AssertionError("fatal error in idFn");
+        });
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+
+        fn.processElement(mockProcessContext("{\"a\":1}"));
+    }
+
+    @Test
+    public void processElement_validPrettyPrintedJson_compactedInSinglePassAndAddedToBatch() throws Exception {
+        ElasticsearchIO.Append spec = ElasticsearchIO.append().withIdFn(doc -> "doc-1");
+        ElasticsearchIO.Append.AppendFn fn = createTestAppendFn(spec);
+
+        String prettyDoc = "{\n  \"msg\": \"line1\\nline2\",\r\n  \"n\": 1\n}\r\n";
+        fn.processElement(mockProcessContext(prettyDoc));
+
+        assertEquals("Valid document must not increment non-retryable failures",
+            0L, fn.asyncDocsFailedNonRetryable.sum());
+        assertEquals("Valid document must be added to batch", 1, fn.batch.size());
+        String unitStr = new String(fn.batch.get(0), StandardCharsets.UTF_8);
+        assertEquals("{\"index\":{\"_id\":\"doc-1\"}}\n{   \"msg\": \"line1\\nline2\",    \"n\": 1 }\n",
+            unitStr);
+    }
+
+    // =========================================================================
+    // ConnectionConf SSL, Keystore Builders, and Complete PoolKey Tests
+    // =========================================================================
+
+    @Test
+    public void connectionConf_keystoreBuildersAndToStringRedaction() {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withKeystorePath("/etc/ssl/certs/es-client.jks")
+            .withKeystorePassword("keystore-secret-pw");
+
+        assertEquals("/etc/ssl/certs/es-client.jks", conf.getKeystorePath());
+        assertEquals("keystore-secret-pw", conf.getKeystorePassword());
+
+        String str = conf.toString();
+        assertTrue(str.contains("keystorePath=/etc/ssl/certs/es-client.jks"));
+        assertFalse("toString must NOT contain keystorePassword", str.contains("keystore-secret-pw"));
+        assertTrue(str.contains("keystorePassword=***"));
+    }
+
+    @Test
+    public void poolKey_includesKeystoreAndClientTuningFields() {
+        ElasticsearchIO.ConnectionConf base = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withKeystorePath("/path/a.jks")
+            .withKeystorePassword("pw1")
+            .withSocketTimeout(60000)
+            .withConnectTimeout(10000)
+            .withNumThread(4);
+
+        assertNotEquals("Different keystorePath must produce different pool key",
+            base.getPoolKey(),
+            base.withKeystorePath("/path/b.jks").getPoolKey());
+        assertNotEquals("Different keystorePassword must produce different pool key",
+            base.getPoolKey(),
+            base.withKeystorePassword("pw2").getPoolKey());
+        assertNotEquals("Different socketTimeout must produce different pool key",
+            base.getPoolKey(),
+            base.withSocketTimeout(90000).getPoolKey());
+        assertNotEquals("Different connectTimeout must produce different pool key",
+            base.getPoolKey(),
+            base.withConnectTimeout(20000).getPoolKey());
+        assertNotEquals("Different numThread must produce different pool key",
+            base.getPoolKey(),
+            base.withNumThread(8).getPoolKey());
+    }
+
+    @Test
+    public void createClientBuilder_standaloneTrustSelfSignedCerts_configuresCustomSslOnHttpClient() throws Exception {
+        synchronized (ElasticsearchIO.ConnectionConf.class) {
+            java.lang.reflect.Field callbackField =
+                org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
+            callbackField.setAccessible(true);
+
+            java.lang.reflect.Field sslContextField =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslcontext");
+            sslContextField.setAccessible(true);
+            java.lang.reflect.Field sslStrategyField =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslStrategy");
+            sslStrategyField.setAccessible(true);
+
+            // Baseline: without trustSelfSignedCerts, no custom SSLContext or SSLStrategy is installed
+            ElasticsearchIO.ConnectionConf defaultConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withTrustSelfSignedCerts(false);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback defaultCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(defaultConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder defaultHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            defaultCallback.customizeHttpClient(defaultHttpBuilder);
+            assertNull("Default ConnectionConf must leave sslContext null",
+                sslContextField.get(defaultHttpBuilder));
+            assertNull("Default ConnectionConf must leave sslStrategy null",
+                sslStrategyField.get(defaultHttpBuilder));
+
+            // Standalone trustSelfSignedCerts (no keystorePath): must install custom SSLContext and SSLStrategy
+            ElasticsearchIO.ConnectionConf selfSignedConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withTrustSelfSignedCerts(true);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback selfSignedCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(selfSignedConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder selfSignedHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            selfSignedCallback.customizeHttpClient(selfSignedHttpBuilder);
+            assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLContext",
+                sslContextField.get(selfSignedHttpBuilder));
+            assertNotNull("Standalone trustSelfSignedCerts must configure a custom SSLIOSessionStrategy",
+                sslStrategyField.get(selfSignedHttpBuilder));
+        }
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void createClientBuilder_missingKeystoreFile_failsFastWithIOException() throws Exception {
+        ElasticsearchIO.ConnectionConf conf = ElasticsearchIO.ConnectionConf
+            .create("https://es.example.com:9200", "my-index")
+            .withKeystorePath("/nonexistent/path/to/keystore.jks")
+            .withKeystorePassword("secret");
+
+        conf.createClientBuilder();
+    }
+
+    // =========================================================================
+    // Full-File Review Regression Tests (Items 1–4)
+    // =========================================================================
+
+    @Test
+    public void byteBufferPool_sharedAcrossAppendFnInstancesOnSameWorkerThread() {
+        // Item 1: byteBufferPool must be shared per worker thread (not per AppendFn
+        // instance), otherwise each IO thread retains a separate multi-MB buffer for
+        // every cached AppendFn instance on the worker.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append();
+        ElasticsearchIO.Append.AppendFn fn1 = createTestAppendFn(spec);
+        ElasticsearchIO.Append.AppendFn fn2 = createTestAppendFn(spec);
+
+        assertSame(
+            "All AppendFn instances on the same thread must share a single pooled byte buffer",
+            fn1.byteBufferPool.get(),
+            fn2.byteBufferPool.get());
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void expand_pendingTimeoutNotExceedingRetryMaxDurationPlusSocketTimeout_throwsIllegalStateException() {
+        // Item 2: RetryConf.maxDuration (10 min = 600s) + default socketTimeout (120s) = 720s,
+        // which exceeds the default pendingTimeoutSeconds (300s). The final retry attempt can
+        // start just before maxDuration and run for a full socketTimeout past it, causing
+        // finishBundle to time out while the orphaned task is still resending the batch.
+        ElasticsearchIO.Append spec = ElasticsearchIO.append()
+            .withConnectionConf(ElasticsearchIO.ConnectionConf.create("http://localhost:9200", "test-index"))
+            .withRetryConf(ElasticsearchIO.RetryConf.create(5, org.joda.time.Duration.standardMinutes(10)));
+
+        spec.expand(null);
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void createClientBuilder_standaloneTrustSelfSignedCertsInProduction_throwsIllegalStateException()
+            throws Exception {
+        // Item 3: TrustSelfSignedStrategy without a pinned truststore accepts any 1-cert
+        // chain (allowing MITM with a self-signed cert matching the target hostname) and
+        // must be blocked in production environments just like isIgnoreInsecureSSL.
+        synchronized (ElasticsearchIO.ConnectionConf.class) {
+            System.setProperty("ENVIRONMENT", "production");
+            try {
+                ElasticsearchIO.ConnectionConf selfSignedConf = ElasticsearchIO.ConnectionConf
+                    .create("https://es.example.com:9200", "my-index")
+                    .withTrustSelfSignedCerts(true);
+                java.lang.reflect.Field callbackField =
+                    org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
+                callbackField.setAccessible(true);
+                org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback callback =
+                    (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                        callbackField.get(selfSignedConf.createClientBuilder());
+                callback.customizeHttpClient(org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create());
+            } finally {
+                System.clearProperty("ENVIRONMENT");
+            }
+        }
+    }
+
+    private static final String TEST_SELF_SIGNED_SERVER_P12_BASE64 =
+        "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"
+        + "AicQ";
+
+    private static final String TEST_OTHER_CLUSTER_CERT_BASE64 =
+        "MIIC6TCCAdGgAwIBAgIECrkIzzANBgkqhkiG9w0BAQsFADAkMSIwIAYDVQQDExlvdGhlci1jbHVz"
+        + "dGVyLmV4YW1wbGUuY29tMCAXDTI2MTAxMjAxMTA1MVoYDzIxMjYwOTE4MDExMDUxWjAkMSIwIAYD"
+        + "VQQDExlvdGhlci1jbHVzdGVyLmV4YW1wbGUuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB"
+        + "CgKCAQEAh/JA0GiRbepfq/EFQNzoCpN2Lq4oKNE0ZBJuZlR7l6O3CztzUsbg5eW+s6D+KVZTgmyX"
+        + "MNbR0h6y3vbmhKtT1/oYApgjd8kBf4OXUkfrOeHGWlp2tNuhjV0iRZJ3KBg9YIR7vKFVMLdCyBr7"
+        + "WJSLOB+v3utQ2UNfBu4Q9jU1fjwTiPQPqeTYsVoVDBGQAKc5T/VtiLuQhH7gSJWldMIJ+mwU+lX2"
+        + "seDAE4zW9oWRNz7pwx+vlqao06rWMWd4H3zzCmJba9T7XJc/Ud73wSs+G2FqTv5wWbseqe+FZZto"
+        + "uRkYv0c34dCTXhRkKSvievXu7NgsbOmVwSPAHn0JcwqjeQIDAQABoyEwHzAdBgNVHQ4EFgQUwe3k"
+        + "DfD6U93jmD6RRDPdi7yOUhwwDQYJKoZIhvcNAQELBQADggEBAHMVzWfL/CKeq5YSRDk2fVzczzry"
+        + "qv3gWZMqiQeLYOurRLRZh0UJYqj94aB7kQ5M2ufI4bVH7Y7+De/uvkTnRHoOd6vdpmZPfdlEJHod"
+        + "vnbkFl5voVk8iQmtwXrTACEG8bgc10LiX7deT0IVHfaVy1EDly8MuN38WmoJc5lgi5/mX/wqOx5+"
+        + "9wKz7UX3TY5Lhpuh3ZJUd6ooMMvpg4BcFdgEPYGS+BnQu2vp5v8WABevXgtgvbocAJ26JdmA8AVz"
+        + "bSvKY56JKPghgxGLxnXNt6cvhZg70RSGuYjt8BAi7N+o2EoxG+LQ+BxWaZzC6GbFytDERQ18vIqM"
+        + "CnlM2cuXQP4=";
+
+    private static void verifyServerCertificateHandshake(
+            javax.net.ssl.SSLContext clientSslContext,
+            javax.net.ssl.SSLContext serverSslContext) throws javax.net.ssl.SSLException {
+        javax.net.ssl.SSLEngine clientEngine = clientSslContext.createSSLEngine("es.example.com", 9200);
+        clientEngine.setUseClientMode(true);
+        clientEngine.setEnabledProtocols(new String[] { "TLSv1.2" });
+
+        javax.net.ssl.SSLEngine serverEngine = serverSslContext.createSSLEngine();
+        serverEngine.setUseClientMode(false);
+        serverEngine.setEnabledProtocols(new String[] { "TLSv1.2" });
+
+        java.nio.ByteBuffer c2s = java.nio.ByteBuffer.allocate(32768);
+        java.nio.ByteBuffer s2c = java.nio.ByteBuffer.allocate(32768);
+        java.nio.ByteBuffer empty = java.nio.ByteBuffer.allocate(0);
+        java.nio.ByteBuffer sink = java.nio.ByteBuffer.allocate(32768);
+
+        // 1. ClientHello -> Server
+        clientEngine.wrap(empty, c2s);
+        c2s.flip();
+        serverEngine.unwrap(c2s, sink);
+        Runnable task;
+        while ((task = serverEngine.getDelegatedTask()) != null) {
+            task.run();
+        }
+        // 2. ServerHello + Certificate -> Client (triggers X509TrustManager.checkServerTrusted)
+        serverEngine.wrap(empty, s2c);
+        s2c.flip();
+        clientEngine.unwrap(s2c, sink);
+        while ((task = clientEngine.getDelegatedTask()) != null) {
+            task.run();
+        }
+        c2s.clear();
+        clientEngine.wrap(empty, c2s);
+    }
+
+    @Test
+    public void createClientBuilder_keystoreWithTrustSelfSignedCerts_doesNotBypassKeystoreWithTrustSelfSignedStrategy()
+            throws Exception {
+        // When keystorePath is configured, loadTrustMaterial must NOT install
+        // TrustSelfSignedStrategy even if trustSelfSignedCerts is true:
+        // TrustManagerDelegate checks TrustStrategy BEFORE the keystore's X509TrustManager,
+        // so TrustSelfSignedStrategy accepts ANY 1-cert chain and never consults the keystore.
+        byte[] p12Bytes = java.util.Base64.getDecoder().decode(TEST_SELF_SIGNED_SERVER_P12_BASE64);
+        java.security.KeyStore serverKs = java.security.KeyStore.getInstance("PKCS12");
+        serverKs.load(new java.io.ByteArrayInputStream(p12Bytes), "secret".toCharArray());
+        javax.net.ssl.KeyManagerFactory kmf = javax.net.ssl.KeyManagerFactory.getInstance(
+            javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(serverKs, "secret".toCharArray());
+        javax.net.ssl.SSLContext serverSslContext = javax.net.ssl.SSLContext.getInstance("TLSv1.2");
+        serverSslContext.init(kmf.getKeyManagers(), null, null);
+
+        byte[] otherCertBytes = java.util.Base64.getDecoder().decode(TEST_OTHER_CLUSTER_CERT_BASE64);
+        java.security.cert.Certificate otherClusterCert =
+            java.security.cert.CertificateFactory.getInstance("X.509")
+                .generateCertificate(new java.io.ByteArrayInputStream(otherCertBytes));
+
+        java.lang.reflect.Field callbackField =
+            org.elasticsearch.client.RestClientBuilder.class.getDeclaredField("httpClientConfigCallback");
+        callbackField.setAccessible(true);
+        java.lang.reflect.Field sslContextField =
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder.class.getDeclaredField("sslcontext");
+        sslContextField.setAccessible(true);
+
+        java.io.File unpinnedKeystoreFile = java.io.File.createTempFile("es-unpinned-truststore-", ".jks");
+        java.io.File pinnedKeystoreFile = java.io.File.createTempFile("es-pinned-truststore-", ".jks");
+        unpinnedKeystoreFile.deleteOnExit();
+        pinnedKeystoreFile.deleteOnExit();
+        try {
+            // Case 1: Keystore pins a different cert + trustSelfSignedCerts(true).
+            // A MITM presenting an unpinned self-signed cert MUST be rejected with SSLHandshakeException.
+            java.security.KeyStore unpinnedKs = java.security.KeyStore.getInstance("jks");
+            unpinnedKs.load(null, "secret".toCharArray());
+            unpinnedKs.setCertificateEntry("other-cluster", otherClusterCert);
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(unpinnedKeystoreFile)) {
+                unpinnedKs.store(fos, "secret".toCharArray());
+            }
+
+            ElasticsearchIO.ConnectionConf unpinnedConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withKeystorePath(unpinnedKeystoreFile.getAbsolutePath())
+                .withKeystorePassword("secret")
+                .withTrustSelfSignedCerts(true);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback unpinnedCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(unpinnedConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder unpinnedHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            unpinnedCallback.customizeHttpClient(unpinnedHttpBuilder);
+            javax.net.ssl.SSLContext unpinnedClientSsl =
+                (javax.net.ssl.SSLContext) sslContextField.get(unpinnedHttpBuilder);
+            assertNotNull(unpinnedClientSsl);
+
+            try {
+                verifyServerCertificateHandshake(unpinnedClientSsl, serverSslContext);
+                fail("Expected SSLHandshakeException when server self-signed cert is not in keystorePath");
+            } catch (javax.net.ssl.SSLHandshakeException expected) {
+                // Expected: keystore was consulted and rejected the unpinned self-signed certificate
+            }
+
+            // Case 2: Keystore containing the cluster's self-signed cert MUST trust it with TrustStrategy=null
+            java.security.KeyStore pinnedKs = java.security.KeyStore.getInstance("jks");
+            pinnedKs.load(null, "secret".toCharArray());
+            pinnedKs.setCertificateEntry("es-cluster", serverKs.getCertificate("server"));
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(pinnedKeystoreFile)) {
+                pinnedKs.store(fos, "secret".toCharArray());
+            }
+
+            ElasticsearchIO.ConnectionConf pinnedConf = ElasticsearchIO.ConnectionConf
+                .create("https://es.example.com:9200", "my-index")
+                .withKeystorePath(pinnedKeystoreFile.getAbsolutePath())
+                .withKeystorePassword("secret")
+                .withTrustSelfSignedCerts(false);
+            org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback pinnedCallback =
+                (org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback)
+                    callbackField.get(pinnedConf.createClientBuilder());
+            org.apache.http.impl.nio.client.HttpAsyncClientBuilder pinnedHttpBuilder =
+                org.apache.http.impl.nio.client.HttpAsyncClientBuilder.create();
+            pinnedCallback.customizeHttpClient(pinnedHttpBuilder);
+            javax.net.ssl.SSLContext pinnedClientSsl =
+                (javax.net.ssl.SSLContext) sslContextField.get(pinnedHttpBuilder);
+            assertNotNull(pinnedClientSsl);
+
+            verifyServerCertificateHandshake(pinnedClientSsl, serverSslContext);
+        } finally {
+            unpinnedKeystoreFile.delete();
+            pinnedKeystoreFile.delete();
+        }
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_fewerItemsThanExpected_throwsIOException() throws Exception {
+        // Item 4a: 3 documents sent, but response with errors=true only contains 2 items.
+        // Without a count check, the 3rd document is neither counted as indexed nor retried
+        // and is silently lost when the bundle commits.
+        String body = "{\"took\":5,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":201}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":429,\"error\":{\"type\":\"es_rejected_execution_exception\",\"reason\":\"busy\"}}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 3);
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void parseBulkResponse_moreItemsThanExpected_throwsIOException() throws Exception {
+        // Item 4b: 1 document sent, but response with errors=true contains 2 items.
+        // Without a count check, docs.get(f.index) in processBatchWithRetry throws
+        // IndexOutOfBoundsException on index 1.
+        String body = "{\"took\":5,\"errors\":true,\"items\":["
+            + "{\"index\":{\"_id\":\"1\",\"status\":201}},"
+            + "{\"index\":{\"_id\":\"2\",\"status\":429,\"error\":{\"type\":\"es_rejected_execution_exception\",\"reason\":\"busy\"}}}"
+            + "]}";
+        HttpEntity entity = new ByteArrayEntity(body.getBytes(StandardCharsets.UTF_8), ContentType.APPLICATION_JSON);
+
+        ElasticsearchIO.parseBulkResponse(entity, 8, false, 1);
+    }
 }
+

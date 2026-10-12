@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
+import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClientBuilder;
 import org.elasticsearch.client.RestClientBuilder.HttpClientConfigCallback;
 
@@ -74,9 +75,10 @@ import java.util.zip.Deflater;
 import java.util.zip.GZIPOutputStream;
 import java.io.ByteArrayOutputStream;
 
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Strings;
 
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
@@ -123,6 +125,10 @@ public class ElasticsearchIO {
     // Pre-computed auto-id action line for bulk request building (used when no idFn
     // is configured — see Append.withIdFn for the deterministic-id variant)
     private static final byte[] INDEX_ACTION_BYTES = "{\"index\":{}}\n".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] INDEX_ID_ACTION_PREFIX_BYTES =
+        "{\"index\":{\"_id\":".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] INDEX_ID_ACTION_SUFFIX_BYTES =
+        "}}\n".getBytes(StandardCharsets.UTF_8);
 
     // _bulk bodies are newline-delimited JSON, not a single JSON document. ES 7/8
     // still accept application/json on _bulk as a backward-compatibility path, but
@@ -321,9 +327,10 @@ public class ElasticsearchIO {
         }
 
         /**
-         * Connection pooling key for client reuse. Includes all security-relevant fields
-         * so that connections with different credentials, SSL settings, or keystores
-         * are never incorrectly shared.
+         * Connection pooling key for client reuse. Includes all security-relevant and
+         * client-configuration fields so that connections with different credentials,
+         * SSL settings, keystores, timeouts, or IO thread counts are never incorrectly
+         * shared.
          */
         public String getPoolKey() {
             StringBuilder key = new StringBuilder();
@@ -334,7 +341,11 @@ public class ElasticsearchIO {
                .append(getApiKey() != null ? getApiKey().hashCode() : 0).append('|')
                .append(isIgnoreInsecureSSL()).append('|')
                .append(isTrustSelfSignedCerts()).append('|')
-               .append(getKeystorePath() != null ? getKeystorePath() : "nokeys");
+               .append(getKeystorePath() != null ? getKeystorePath() : "nokeys").append('|')
+               .append(getKeystorePassword() != null ? getKeystorePassword().hashCode() : 0).append('|')
+               .append(getSocketTimeout() != null ? getSocketTimeout() : DEFAULT_SOCKET_TIMEOUT_MILLIS).append('|')
+               .append(getConnectTimeout() != null ? getConnectTimeout() : DEFAULT_CONNECT_TIMEOUT_MILLIS).append('|')
+               .append(getNumThread() != null ? getNumThread() : 0);
             return key.toString();
         }
 
@@ -408,6 +419,16 @@ public class ElasticsearchIO {
             return builder().setApiKey(apiKey).build();
         }
 
+        public ConnectionConf withKeystorePath(String keystorePath) {
+            checkArgument(!Strings.isNullOrEmpty(keystorePath), "keystorePath can not be null or empty");
+            return builder().setKeystorePath(keystorePath).build();
+        }
+
+        public ConnectionConf withKeystorePassword(String keystorePassword) {
+            checkArgument(keystorePassword != null, "keystorePassword can not be null");
+            return builder().setKeystorePassword(keystorePassword).build();
+        }
+
         public ConnectionConf withTrustSelfSignedCerts(boolean trustSelfSignedCerts) {
             return builder().setTrustSelfSignedCerts(trustSelfSignedCerts).build();
         }
@@ -439,7 +460,7 @@ public class ElasticsearchIO {
             return withIgnoreInsecureSSL(ignoreInsecureSSL);
         }
 
-        private RestClientBuilder createClientBuilder() throws IOException {
+        RestClientBuilder createClientBuilder() throws IOException {
             // The address may be a comma-separated list of node URLs. RestClient
             // round-robins across the hosts it is given; a single host funnels every
             // bulk request through one coordinating node, making it both the
@@ -455,9 +476,10 @@ public class ElasticsearchIO {
 
             RestClientBuilder restClientBuilder = RestClient.builder(esHosts);
 
-            // Pre-load keystore SSL context if configured (done outside callback to fail fast)
-            final SSLContext keystoreSslContext;
-            final SSLIOSessionStrategy keystoreSessionStrategy;
+            // Pre-load keystore or standalone self-signed SSL context if configured
+            // (done outside the callback to fail fast on invalid keystore paths/passwords)
+            final SSLContext customSslContext;
+            final SSLIOSessionStrategy customSessionStrategy;
             if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
                 try {
                     KeyStore keyStore = KeyStore.getInstance("jks");
@@ -465,17 +487,42 @@ public class ElasticsearchIO {
                         String keystorePassword = getKeystorePassword();
                         keyStore.load(is, (keystorePassword == null) ? null : keystorePassword.toCharArray());
                     }
-                    final TrustStrategy trustStrategy =
-                        isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
-                    keystoreSslContext =
-                        SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
-                    keystoreSessionStrategy = new SSLIOSessionStrategy(keystoreSslContext);
+                    // Always pass null as the TrustStrategy when a keystore is provided:
+                    // a keystore holding the cluster's self-signed certificate or CA
+                    // already trusts it via standard JSSE X509TrustManager, whereas passing
+                    // TrustSelfSignedStrategy causes TrustManagerDelegate to accept ANY
+                    // 1-certificate chain before consulting the keystore (MITM vulnerability).
+                    customSslContext =
+                        SSLContexts.custom().loadTrustMaterial(keyStore, (TrustStrategy) null).build();
+                    customSessionStrategy = new SSLIOSessionStrategy(customSslContext);
                 } catch (Exception e) {
                     throw new IOException("Can't load the client certificate from the keystore", e);
                 }
+            } else if (isTrustSelfSignedCerts() && !isIgnoreInsecureSSL()) {
+                // SECURITY WARNING: Without a keystorePath pinning the cluster's CA or
+                // certificate, TrustSelfSignedStrategy accepts ANY 1-certificate chain.
+                // An attacker on the network path can generate a self-signed certificate
+                // with CN/SAN matching the Elasticsearch hostname, pass hostname
+                // verification, and intercept credentials/API keys and documents (MITM).
+                if (isProductionEnvironment()) {
+                    throw new IllegalStateException(
+                        "Standalone trustSelfSignedCerts (without keystorePath) is FORBIDDEN in production "
+                        + "environments because TrustSelfSignedStrategy accepts any self-signed certificate. "
+                        + "Configure keystorePath with the cluster's certificate or CA instead.");
+                }
+                logger.warn("*** STANDALONE trustSelfSignedCerts IS ENABLED WITHOUT keystorePath ***");
+                logger.warn("*** ANY SELF-SIGNED CERT MATCHING HOSTNAME WILL BE TRUSTED — DO NOT USE IN PRODUCTION ***");
+                try {
+                    customSslContext = SSLContexts.custom()
+                        .loadTrustMaterial(null, new TrustSelfSignedStrategy())
+                        .build();
+                    customSessionStrategy = new SSLIOSessionStrategy(customSslContext);
+                } catch (Exception e) {
+                    throw new IOException("Can't initialize SSLContext for trustSelfSignedCerts", e);
+                }
             } else {
-                keystoreSslContext = null;
-                keystoreSessionStrategy = null;
+                customSslContext = null;
+                customSessionStrategy = null;
             }
 
             // Single consolidated HttpClientConfigCallback — prevents the old bug where
@@ -517,16 +564,15 @@ public class ElasticsearchIO {
                                         .setSoKeepAlive(true)
                                         .build());
 
-                                // Keystore-based SSL (takes priority over insecure SSL)
-                                if (keystoreSslContext != null) {
-                                    httpAsyncClientBuilder.setSSLContext(keystoreSslContext)
-                                        .setSSLStrategy(keystoreSessionStrategy);
+                                // Keystore-based or standalone self-signed SSL (takes priority over insecure SSL)
+                                if (customSslContext != null) {
+                                    httpAsyncClientBuilder.setSSLContext(customSslContext)
+                                        .setSSLStrategy(customSessionStrategy);
                                 } else if (isIgnoreInsecureSSL()) {
                                     // SECURITY WARNING: This disables ALL TLS certificate verification.
                                     // An attacker in network position can intercept all traffic including
                                     // credentials and documents (MITM attack).
-                                    String env = System.getenv("ENVIRONMENT");
-                                    if ("production".equalsIgnoreCase(env) || "prod".equalsIgnoreCase(env)) {
+                                    if (isProductionEnvironment()) {
                                         throw new IllegalStateException(
                                             "isIgnoreInsecureSSL is FORBIDDEN in production environments. " +
                                             "Configure proper TLS certificates via keystorePath instead.");
@@ -549,12 +595,9 @@ public class ElasticsearchIO {
 
                                         httpAsyncClientBuilder.setSSLContext(context)
                                             .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
-                                    } catch (NoSuchAlgorithmException ex) {
+                                    } catch (NoSuchAlgorithmException | KeyManagementException ex) {
                                         logger.error("Error when setup dummy SSLContext", ex);
-                                    } catch (KeyManagementException ex) {
-                                        logger.error("Error when setup dummy SSLContext", ex);
-                                    } catch (Exception ex) {
-                                        logger.error("Error when setup dummy SSLContext", ex);
+                                        throw new IllegalStateException("Failed to initialize insecure SSLContext", ex);
                                     }
                                 }
 
@@ -587,6 +630,14 @@ public class ElasticsearchIO {
             );
 
             return restClientBuilder;
+        }
+
+        private static boolean isProductionEnvironment() {
+            String env = System.getenv("ENVIRONMENT");
+            if (env == null || env.isEmpty()) {
+                env = System.getProperty("ENVIRONMENT");
+            }
+            return "production".equalsIgnoreCase(env) || "prod".equalsIgnoreCase(env);
         }
 
         // Double-check pattern: avoids holding ConcurrentHashMap bucket lock during
@@ -814,17 +865,24 @@ public class ElasticsearchIO {
             ConnectionConf connectionConf = getConnectionConf();
             checkState(null != connectionConf, "withConnectionConf() is required");
 
-            // A single bulk request may legitimately run up to the socket timeout
-            // (plus retry backoffs). A pending timeout at or below it guarantees
-            // FinishBundle gives up on requests that are still in flight, failing the
-            // bundle — and bundle retries re-index every already-written document.
+            // A single bulk request may legitimately run up to the retry budget
+            // (RetryConf.maxDuration when retries are enabled) PLUS one full socket
+            // timeout for the final attempt started just before the retry deadline.
+            // A pending timeout at or below (maxDuration + socketTimeout) allows
+            // FinishBundle to give up on requests that are still in flight, failing the
+            // bundle while the orphaned IO task continues resending — duplicating every
+            // already-written document when idFn is not set.
             // Fail at pipeline construction instead of at runtime.
-            int socketTimeoutMillis = connectionConf.getSocketTimeout() != null
+            long socketTimeoutMillis = connectionConf.getSocketTimeout() != null
                 ? connectionConf.getSocketTimeout() : DEFAULT_SOCKET_TIMEOUT_MILLIS;
-            checkState(getPendingTimeoutSeconds() * 1000L > socketTimeoutMillis,
-                "pendingTimeoutSeconds (%s s) must exceed the socket timeout (%s ms), "
+            RetryConf retryConf = getRetryConf();
+            long retryBudgetMillis = (retryConf != null && retryConf.getMaxAttempts() > 1)
+                ? retryConf.getMaxDuration().getMillis() : 0L;
+            long minRequiredMillis = retryBudgetMillis + socketTimeoutMillis;
+            checkState(getPendingTimeoutSeconds() * 1000L > minRequiredMillis,
+                "pendingTimeoutSeconds (%s s) must exceed retry maxDuration (%s ms) + socket timeout (%s ms) = %s ms, "
                 + "or FinishBundle will abandon bulk requests that are still in flight",
-                getPendingTimeoutSeconds(), socketTimeoutMillis);
+                getPendingTimeoutSeconds(), retryBudgetMillis, socketTimeoutMillis, minRequiredMillis);
 
             input.apply(ParDo.of(new AppendFn(this)));
             return PDone.in(input.getPipeline());
@@ -843,6 +901,11 @@ public class ElasticsearchIO {
                 Metrics.counter(ElasticsearchIO.class, "docsFailedRetriesExhausted");
             private static final Counter METRIC_DOCS_DROPPED_OVERSIZED =
                 Metrics.counter(ElasticsearchIO.class, "docsDroppedOversized");
+            // Per-attempt backpressure signal: counts every item-level 429 rejection
+            // event across all retry attempts (both per-item 429s in a 200 _bulk
+            // response and whole-batch HTTP 429 responses, which add docCount per
+            // rejected attempt). Terminal document failures after retries are exhausted
+            // are tracked separately by METRIC_DOCS_FAILED_RETRIES_EXHAUSTED.
             private static final Counter METRIC_BULK_ITEMS_REJECTED_429 =
                 Metrics.counter(ElasticsearchIO.class, "bulkItemsRejected429");
             private static final Distribution METRIC_BULK_LATENCY_MS =
@@ -852,25 +915,34 @@ public class ElasticsearchIO {
             static final String RETRY_ATTEMPT_LOG = "Error writing to Elasticsearch. Retry attempt[%d]";
             static final String RETRY_FAILED_LOG = "Error writing to ES after %d attempt(s). No more attempts allowed";
 
-            private transient FluentBackoff retryBackoff;
+            @VisibleForTesting
+            transient FluentBackoff retryBackoff;
             private final Append spec;
             // volatile: read and replaced concurrently by multiple ioExecutor threads
-            private transient volatile RestClient restClient;
+            @VisibleForTesting
+            transient volatile RestClient restClient;
 
             // transient lock — ReentrantLock is not Serializable
             private transient Object batchLock;
             // Each entry is one complete pre-encoded NDJSON bulk unit
             // (action line + source + trailing newline)
-            private transient List<byte[]> batch;
-            private transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
+            @VisibleForTesting
+            transient List<byte[]> batch;
+            @VisibleForTesting
+            transient long currentBatchSizeBytes; // plain long — always accessed inside synchronized(batchLock)
             private volatile long lastFlushTime;
 
             // Connection pooling
             private transient String poolKey;
             private transient String poolKeyForLog; // redacted version for logging
 
-            // Performance optimization: reuse byte buffers (exposed subclass avoids toByteArray copy)
-            private transient ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool;
+            // Worker-wide ThreadLocal buffer pool: shared across all AppendFn instances
+            // on the worker so each shared ioExecutor thread retains at most ONE reusable
+            // ExposedByteArrayOutputStream, rather than retaining a separate multi-MB
+            // buffer per cached AppendFn instance (which scaled as O(instances * ioThreads)).
+            @VisibleForTesting
+            static final ThreadLocal<ExposedByteArrayOutputStream> byteBufferPool =
+                ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
 
             // Shared (per pool key, reference-counted) scheduler for time-based flushing
             private transient ScheduledExecutorService scheduler;
@@ -879,13 +951,16 @@ public class ElasticsearchIO {
             private transient ScheduledFuture<?> flushTask;
 
             // Shared IO executor — avoids starving ForkJoinPool.commonPool() with blocking HTTP calls
-            private transient ExecutorService ioExecutor;
+            @VisibleForTesting
+            transient ExecutorService ioExecutor;
 
             // Shared backpressure: bounds in-flight ES requests per worker, not per instance
-            private transient Semaphore concurrencySemaphore;
+            @VisibleForTesting
+            transient Semaphore concurrencySemaphore;
 
             // transient ConcurrentLinkedQueue — lock-free, no serialization issue
-            private transient Queue<CompletableFuture<Void>> pendingOperations;
+            @VisibleForTesting
+            transient Queue<CompletableFuture<Void>> pendingOperations;
 
             // Count of flushes that have swapped the batch out but not yet registered
             // their future in pendingOperations (or restored the batch). FinishBundle
@@ -896,32 +971,40 @@ public class ElasticsearchIO {
             // First failure from a self-removed future (see flushBatch): completed
             // futures leave pendingOperations eagerly, so their errors must be
             // captured separately for FinishBundle to propagate.
-            private transient AtomicReference<Throwable> firstAsyncFailure;
+            @VisibleForTesting
+            transient AtomicReference<Throwable> firstAsyncFailure;
 
             // IO threads have no Beam metrics container, so async completions
-            // accumulate here and are drained into the Beam counters on the bundle
-            // thread in @FinishBundle. (Counts from a failed bundle drain with the
-            // next successful one — attribution shifts, totals stay correct.)
+            // (and element-level non-retryable rejections) accumulate here and are
+            // drained into the Beam counters on the bundle thread in @FinishBundle.
+            // (Counts from a failed bundle drain with the next successful one —
+            // attribution shifts, totals stay correct.)
             private transient LongAdder asyncDocsIndexed;
-            private transient LongAdder asyncDocsFailedNonRetryable;
+            @VisibleForTesting
+            transient LongAdder asyncDocsFailedNonRetryable;
             private transient LongAdder asyncDocsFailedRetriesExhausted;
-            private transient LongAdder asyncRejected429;
+            @VisibleForTesting
+            transient LongAdder asyncRejected429;
             private transient Queue<Long> asyncBulkLatenciesMs;
 
             AppendFn(Append spec) {
                 this.spec = spec;
             }
 
-            @Setup
-            public void setup() throws IOException {
-                ConnectionConf connectionConf = spec.getConnectionConf();
-                poolKey = connectionConf.getPoolKey();
-                poolKeyForLog = connectionConf.getPoolKeyForLogging();
-
-                // Initialize lock after deserialization
+            /**
+             * Initializes non-network transient state after DoFn deserialization.
+             * Extracted so unit tests can initialize an {@link AppendFn} in one call
+             * without duplicating {@link #setup()} field wiring by hand.
+             *
+             * <p>Note: {@code concurrencySemaphore}, {@code ioExecutor}, and
+             * {@code scheduler} are intentionally left unset here so {@link #setup()}
+             * must wire the worker-shared instances from {@link #acquireSharedExecutors}
+             * (and {@link #flushBatch} fails loudly with {@link IllegalStateException}
+             * if they are missing).
+             */
+            @VisibleForTesting
+            void initTransientState() {
                 batchLock = new Object();
-
-                // Initialize lock-free queue after deserialization
                 pendingOperations = new ConcurrentLinkedQueue<>();
                 unregisteredFlushes = new AtomicInteger(0);
                 firstAsyncFailure = new AtomicReference<>();
@@ -932,23 +1015,29 @@ public class ElasticsearchIO {
                 asyncRejected429 = new LongAdder();
                 asyncBulkLatenciesMs = new ConcurrentLinkedQueue<>();
 
-                // Initialize ThreadLocal after deserialization
-                byteBufferPool = ThreadLocal.withInitial(() -> new ExposedByteArrayOutputStream(8192));
+                retryBackoff = FluentBackoff.DEFAULT
+                    .withMaxRetries(0)
+                    .withInitialBackoff(RETRY_INITIAL_BACKOFF);
 
-                // Executors and the backpressure semaphore are SHARED across all
-                // instances with the same pool key (reference-counted), so
-                // maxConcurrentRequests bounds the whole worker's in-flight requests
-                // instead of multiplying by the DoFn instance count. Thread names use
-                // the REDACTED key: the raw pool key embeds the username and
-                // password/apiKey hashes, and thread names surface in every stack
-                // trace, thread dump, and %t log pattern.
-                SharedExecutors shared = acquireSharedExecutors(
-                    poolKey, poolKeyForLog, spec.getMaxConcurrentRequests());
-                scheduler = shared.scheduler;
-                ioExecutor = shared.ioExecutor;
-                concurrencySemaphore = shared.semaphore;
+                if (spec.getRetryConf() != null) {
+                    retryBackoff = FluentBackoff.DEFAULT
+                        .withInitialBackoff(RETRY_INITIAL_BACKOFF)
+                        .withMaxRetries(spec.getRetryConf().getMaxAttempts() - 1)
+                        .withMaxCumulativeBackoff(spec.getRetryConf().getMaxDuration());
+                }
+            }
 
-                // Get pooled client with retry on failure
+            @Setup
+            public void setup() throws IOException {
+                ConnectionConf connectionConf = spec.getConnectionConf();
+                poolKey = connectionConf.getPoolKey();
+                poolKeyForLog = connectionConf.getPoolKeyForLogging();
+
+                initTransientState();
+
+                // Acquire pooled client BEFORE incrementing SharedExecutors refCount:
+                // if client creation throws, Beam does not invoke @Teardown, so acquiring
+                // shared executors first would permanently leak a refCount.
                 try {
                     restClient = connectionConf.getPooledClient();
                 } catch (IOException e) {
@@ -962,16 +1051,18 @@ public class ElasticsearchIO {
                         "4. SSL/authentication configuration", e);
                 }
 
-                retryBackoff = FluentBackoff.DEFAULT
-                    .withMaxRetries(0)
-                    .withInitialBackoff(RETRY_INITIAL_BACKOFF);
-
-                if (spec.getRetryConf() != null) {
-                    retryBackoff = FluentBackoff.DEFAULT
-                        .withInitialBackoff(RETRY_INITIAL_BACKOFF)
-                        .withMaxRetries(spec.getRetryConf().getMaxAttempts() - 1)
-                        .withMaxCumulativeBackoff(spec.getRetryConf().getMaxDuration());
-                }
+                // Executors and the backpressure semaphore are SHARED across all
+                // instances with the same pool key (reference-counted), so
+                // maxConcurrentRequests bounds the whole worker's in-flight requests
+                // instead of multiplying by the DoFn instance count. Thread names use
+                // the REDACTED key: the raw pool key embeds the username and
+                // password/apiKey hashes, and thread names surface in every stack
+                // trace, thread dump, and %t log pattern.
+                SharedExecutors shared = acquireSharedExecutors(
+                    poolKey, poolKeyForLog, spec.getMaxConcurrentRequests());
+                scheduler = shared.scheduler;
+                ioExecutor = shared.ioExecutor;
+                concurrencySemaphore = shared.semaphore;
 
                 // Schedule the periodic flush ONCE for the whole DoFn lifetime and cancel
                 // it in @Teardown. Scheduling per bundle leaked tasks: @FinishBundle is
@@ -1006,56 +1097,125 @@ public class ElasticsearchIO {
                 // Reset under batchLock: the instance-scoped scheduler thread reads and
                 // swaps these fields concurrently, and unsynchronized writes here have
                 // no happens-before edge for it (batch is a plain field).
+                // Allocate FRESH pendingOperations and firstAsyncFailure instances per
+                // bundle rather than clearing in place: if a previous bundle failed or
+                // timed out while one of its IO futures was still running, that orphaned
+                // future holds a reference to the old bundle's queue and failure cell.
+                // Mutating shared instances in place allowed a late failure from an
+                // aborted bundle to write into firstAsyncFailure during the next healthy
+                // bundle and fail it at @FinishBundle.
                 synchronized (batchLock) {
-                    // Pre-allocate with estimated capacity for better performance
                     int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
                     batch = new ArrayList<byte[]>(estimatedCapacity);
                     currentBatchSizeBytes = 0;
+                    pendingOperations = new ConcurrentLinkedQueue<>();
+                    firstAsyncFailure = new AtomicReference<>();
                 }
                 lastFlushTime = System.currentTimeMillis();
-
-                // Drop futures left behind by a FAILED bundle (@FinishBundle only clears
-                // the queue when it runs). Awaiting them here would fail this healthy
-                // bundle on the previous bundle's errors; the failed bundle is being
-                // retried by the runner anyway, so its data is not lost.
-                pendingOperations.clear();
-                firstAsyncFailure.set(null);
             }
 
             @ProcessElement
             public void processElement(ProcessContext context) throws Exception {
                 String doc = context.element();
+                if (doc == null) {
+                    totalErrors.increment();
+                    asyncDocsFailedNonRetryable.increment();
+                    logger.error("Null document received in ElasticsearchIO.AppendFn — skipping.");
+                    return;
+                }
 
                 // Encode to UTF-8 once — stored as byte[] in the batch to avoid
                 // double encoding (was: encode here for size, encode again in buildBulkRequest)
                 byte[] docUtf8 = doc.getBytes(StandardCharsets.UTF_8);
 
-                // Guard against oversized documents that could cause OOM via memory amplification
+                // Strip trailing '\r' / '\n' and reject empty or whitespace-only documents.
+                // An empty source line in an NDJSON _bulk body causes Elasticsearch to
+                // reject the entire batch with HTTP 400.
+                int docLen = trimTrailingNewlines(docUtf8);
+                if (isBlankUtf8(docUtf8, docLen)) {
+                    totalErrors.increment();
+                    asyncDocsFailedNonRetryable.increment();
+                    logger.error("Empty or whitespace-only document received in ElasticsearchIO.AppendFn — skipping.");
+                    return;
+                }
+
+                // Fast pre-check before invoking idFn / allocating the bulk unit buffer:
+                // guard against oversized documents that could cause OOM via memory amplification
                 // (byte[] in batch + bulk request buffer + optional gzip = up to 4x amplification)
-                if (docUtf8.length > spec.getMaxBatchSizeBytes()) {
+                if (docLen > spec.getMaxBatchSizeBytes()) {
                     totalErrors.increment();
                     // Counted in the Dataflow UI — an oversized drop must never be
                     // discoverable only by grepping worker logs.
                     METRIC_DOCS_DROPPED_OVERSIZED.inc();
                     logger.error("Document exceeds max batch size ({} bytes > {} bytes limit). Skipping.",
-                        docUtf8.length, spec.getMaxBatchSizeBytes());
+                        docLen, spec.getMaxBatchSizeBytes());
                     return;
                 }
 
-                byte[] unit = buildBulkUnit(doc, docUtf8);
+                // Single-pass construction + validation: buildBulkUnit resolves idFn
+                // (catching RuntimeException around idFn.apply(doc) only, and rejecting
+                // empty _id) and compacts inter-token newlines while rejecting unescaped
+                // CR/LF inside JSON string literals via InvalidDocumentException.
+                // Catching only InvalidDocumentException ensures Errors (e.g. OutOfMemoryError)
+                // and unexpected exceptions outside idFn still fail the bundle.
+                final byte[] unit;
+                try {
+                    unit = buildBulkUnit(doc, docUtf8, docLen, spec.getIdFn());
+                } catch (InvalidDocumentException e) {
+                    totalErrors.increment();
+                    asyncDocsFailedNonRetryable.increment();
+                    if (e.getCause() != null) {
+                        logger.error("Invalid document in ElasticsearchIO.AppendFn ({}) — skipping.",
+                            e.getMessage(), e.getCause());
+                    } else {
+                        logger.error("Invalid document in ElasticsearchIO.AppendFn ({}) — skipping.",
+                            e.getMessage());
+                    }
+                    return;
+                }
 
-                boolean flushNow;
+                // Full bulk-unit check including action metadata line overhead:
+                // currentBatchSizeBytes tracks unit.length, so a single unit must also fit
+                // within maxBatchSizeBytes.
+                if (unit.length > spec.getMaxBatchSizeBytes()) {
+                    totalErrors.increment();
+                    METRIC_DOCS_DROPPED_OVERSIZED.inc();
+                    logger.error("Bulk unit (action + document) exceeds max batch size ({} bytes > {} bytes limit). Skipping.",
+                        unit.length, spec.getMaxBatchSizeBytes());
+                    return;
+                }
+
+                // If adding this unit to a non-empty batch would push the batch over
+                // maxBatchSizeBytes, flush the existing batch FIRST so a single batch
+                // never overshoots maxBatchSizeBytes (up to 2x previously) and triggers
+                // HTTP 413 Payload Too Large from Elasticsearch.
+                boolean flushBeforeAdd = false;
+                boolean flushAfterAdd = false;
                 synchronized (batchLock) {
-                    batch.add(unit);
-                    currentBatchSizeBytes += unit.length;
-                    flushNow = shouldFlush();
+                    if (!batch.isEmpty()
+                            && currentBatchSizeBytes + unit.length > spec.getMaxBatchSizeBytes()) {
+                        flushBeforeAdd = true;
+                    } else {
+                        batch.add(unit);
+                        currentBatchSizeBytes += unit.length;
+                        flushAfterAdd = shouldFlush();
+                    }
                 }
 
                 // Flush OUTSIDE batchLock: flushBatchAsync() may block on the
                 // backpressure semaphore, and blocking while holding the monitor
                 // would freeze the time-based flusher and stall the whole DoFn on
                 // a single slow Elasticsearch request.
-                if (flushNow) {
+                if (flushBeforeAdd) {
+                    flushBatchAsync();
+                    synchronized (batchLock) {
+                        batch.add(unit);
+                        currentBatchSizeBytes += unit.length;
+                        flushAfterAdd = shouldFlush();
+                    }
+                }
+
+                if (flushAfterAdd) {
                     flushBatchAsync();
                 }
             }
@@ -1071,23 +1231,19 @@ public class ElasticsearchIO {
             public void finishBundle(FinishBundleContext context)
                     throws IOException, InterruptedException {
                 // Flush and wait until quiescent. A single flush is not enough: a
-                // scheduler tick racing this method can swap the batch out (so our
-                // flush sees it empty) and then fail tryAcquire and RESTORE the
-                // documents into the new batch after our flush already ran. Without
-                // re-checking, the bundle would commit with those documents sitting
-                // unflushed in `batch`, and the next @StartBundle would overwrite
-                // them — silent loss after ack. The loop terminates because no new
-                // elements arrive during @FinishBundle (Beam processes a DoFn
-                // instance serially), so ticks can only swap/restore existing docs,
-                // and waitForPendingOperations' timeout bounds each iteration.
+                // scheduler tick racing this method can swap the batch out or register
+                // a new future in pendingOperations while waitForPendingOperations is
+                // awaiting an earlier snapshot. Looping until batch, unregisteredFlushes,
+                // and pendingOperations are all empty under batchLock guarantees no
+                // in-flight or restored documents remain when the bundle commits.
                 while (true) {
                     flushBatchAsync();
                     waitForPendingOperations();
                     synchronized (batchLock) {
-                        // Ticks increment unregisteredFlushes under batchLock at swap
-                        // time, so both clear under the lock means nothing is pending
-                        // and no swap is mid-flight.
-                        if ((batch == null || batch.isEmpty()) && unregisteredFlushes.get() == 0) {
+                        if ((batch == null || batch.isEmpty())
+                                && unregisteredFlushes.get() == 0
+                                && pendingOperations.isEmpty()
+                                && firstAsyncFailure.get() == null) {
                             break;
                         }
                     }
@@ -1106,15 +1262,14 @@ public class ElasticsearchIO {
             }
 
             // Propagate errors instead of silently dropping data
-            private void waitForPendingOperations() throws IOException, InterruptedException {
+            @VisibleForTesting
+            void waitForPendingOperations() throws IOException, InterruptedException {
                 long timeoutSecs = spec.getPendingTimeoutSeconds();
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSecs);
 
-                // A scheduler-tick flush may have swapped the batch out but not yet
-                // registered its future (flushTask.cancel-style races don't apply here:
-                // the tick keeps running until it hands off or restores). Snapshotting
-                // pendingOperations before that hand-off would let the bundle commit
-                // past in-flight, unacknowledged documents.
+                // A flush may have swapped the batch out but not yet registered its
+                // future (or restored the batch). Snapshotting pendingOperations before
+                // that hand-off would let the bundle commit past in-flight documents.
                 while (unregisteredFlushes.get() > 0) {
                     if (System.nanoTime() >= deadlineNanos) {
                         totalErrors.increment();
@@ -1124,7 +1279,14 @@ public class ElasticsearchIO {
                     Thread.sleep(1);
                 }
 
-                CompletableFuture<Void>[] futures = pendingOperations.toArray(new CompletableFuture[0]);
+                final Queue<CompletableFuture<Void>> bundleOps;
+                final AtomicReference<Throwable> bundleFailure;
+                synchronized (batchLock) {
+                    bundleOps = pendingOperations;
+                    bundleFailure = firstAsyncFailure;
+                }
+
+                CompletableFuture<Void>[] futures = bundleOps.toArray(new CompletableFuture[0]);
                 if (futures.length > 0) {
                     try {
                         long remainingNanos = Math.max(1L, deadlineNanos - System.nanoTime());
@@ -1139,13 +1301,16 @@ public class ElasticsearchIO {
                         totalErrors.increment();
                         throw new IOException("Elasticsearch batch operation failed", e.getCause());
                     } finally {
-                        pendingOperations.clear();
+                        // Remove ONLY the futures we actually awaited — calling clear()
+                        // here would wipe out any new future added by a concurrent
+                        // scheduler tick while allOf(futures).get() was blocking.
+                        bundleOps.removeAll(Arrays.asList(futures));
                     }
                 }
 
                 // Failed futures may have self-removed before the snapshot was taken;
                 // their captured error must still fail the bundle.
-                Throwable asyncFailure = firstAsyncFailure.getAndSet(null);
+                Throwable asyncFailure = bundleFailure.getAndSet(null);
                 if (asyncFailure != null) {
                     totalErrors.increment();
                     throw new IOException("Elasticsearch batch operation failed", asyncFailure);
@@ -1166,7 +1331,12 @@ public class ElasticsearchIO {
                 }
                 scheduler = null;
                 ioExecutor = null;
-                concurrencySemaphore = null;
+                // Deliberately do NOT null out concurrencySemaphore or byteBufferPool:
+                // if a bundle aborted/timed out while one of its batch jobs was still
+                // queued or running on the shared ioExecutor, nulling these fields causes
+                // byteBufferPool.get() to throw NPE and concurrencySemaphore.release() in
+                // the job's finally block to throw NPE — permanently leaking a permit
+                // from the worker-wide shared semaphore.
 
                 // Don't close pooled clients - they're shared
                 if (pendingOperations != null) {
@@ -1180,24 +1350,41 @@ public class ElasticsearchIO {
             }
 
             /**
-             * Swaps out the accumulated batch and hands it to the IO executor.
-             *
-             * @param mayBlock if true (element/bundle threads) block for a backpressure
-             *     permit; if false (scheduler tick) use tryAcquire so the timer thread is
-             *     never parked — on contention the batch is restored and retried next tick.
+             * Immutable snapshot of the batch and bundle-scoped tracking cells
+             * captured atomically under {@code batchLock} when a flush swaps out
+             * the active batch.
              */
-            private void flushBatch(boolean mayBlock) {
-                List<byte[]> currentBatch;
-                long batchBytes;
+            private static final class SwappedBatch {
+                final List<byte[]> docs;
+                final long sizeBytes;
+                final Queue<CompletableFuture<Void>> bundleOps;
+                final AtomicReference<Throwable> bundleFailure;
 
+                SwappedBatch(
+                        List<byte[]> docs,
+                        long sizeBytes,
+                        Queue<CompletableFuture<Void>> bundleOps,
+                        AtomicReference<Throwable> bundleFailure) {
+                    this.docs = docs;
+                    this.sizeBytes = sizeBytes;
+                    this.bundleOps = bundleOps;
+                    this.bundleFailure = bundleFailure;
+                }
+            }
+
+            /**
+             * Atomically swaps out the current non-empty batch under {@code batchLock},
+             * captures the current bundle's tracking structures, and increments
+             * {@code unregisteredFlushes}. Returns {@code null} if the batch is empty.
+             */
+            private SwappedBatch swapBatchUnderLock() {
                 synchronized (batchLock) {
                     if (batch == null || batch.isEmpty()) {
-                        return;
+                        return null;
                     }
-
                     // Swap batch reference (O(1)) instead of copying (O(n))
-                    currentBatch = batch;
-                    batchBytes = currentBatchSizeBytes;
+                    List<byte[]> currentBatch = batch;
+                    long batchBytes = currentBatchSizeBytes;
 
                     // Allocate fresh batch for next accumulation
                     int estimatedCapacity = (int) Math.min(spec.getMaxBatchSize(), 1000);
@@ -1208,30 +1395,82 @@ public class ElasticsearchIO {
                     // From this point until the future is in pendingOperations (or the
                     // batch is restored), the documents are invisible to FinishBundle.
                     unregisteredFlushes.incrementAndGet();
+                    return new SwappedBatch(
+                        currentBatch, batchBytes, pendingOperations, firstAsyncFailure);
+                }
+            }
+
+            /**
+             * Swaps out the accumulated batch and hands it to the IO executor.
+             *
+             * @param mayBlock if true (element/bundle threads) block for a backpressure
+             *     permit; if false (scheduler tick) acquire a permit via tryAcquire BEFORE
+             *     swapping the batch so the timer thread is never parked and never resets
+             *     {@code lastFlushTime} or triggers {@code restoreBatch} on contention.
+             */
+            @VisibleForTesting
+            void flushBatch(boolean mayBlock) {
+                // Capture local references so a concurrent @Teardown cannot cause NPE
+                // when releasing the semaphore permit in the async task's finally block.
+                // Fail loudly if called before setup() or after @Teardown (e.g. in a
+                // misconfigured test): returning silently with a non-empty batch would
+                // cause finishBundle()'s quiescence loop to spin forever.
+                final Semaphore sem = concurrencySemaphore;
+                final ExecutorService executor = ioExecutor;
+                if (sem == null || executor == null) {
+                    throw new IllegalStateException(
+                        "Cannot flush batch: AppendFn is not initialized or has already been torn down "
+                        + "(concurrencySemaphore=" + sem + ", ioExecutor=" + executor + ")");
                 }
 
-                try {
-                    // Enforce backpressure: block if too many batches are in-flight
-                    if (mayBlock) {
-                        try {
-                            concurrencySemaphore.acquire();
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            // The swapped-out batch is the only reference to these documents.
-                            // Restore it and fail loud — returning silently here would let the
-                            // bundle commit (and Pub/Sub ack) without the data ever being sent.
-                            restoreBatch(currentBatch, batchBytes);
-                            throw new RuntimeException(
-                                "Interrupted while waiting for Elasticsearch backpressure permit; "
-                                + currentBatch.size() + " documents restored to the pending batch", e);
-                        }
-                    } else {
-                        if (!concurrencySemaphore.tryAcquire()) {
-                            restoreBatch(currentBatch, batchBytes);
+                final SwappedBatch swapped;
+                if (!mayBlock) {
+                    synchronized (batchLock) {
+                        if (batch == null || batch.isEmpty()) {
                             return;
                         }
                     }
+                    // Acquire permit BEFORE swapping the batch out: on contention we
+                    // leave the batch untouched and preserve lastFlushTime so the next
+                    // tick (or element) flushes as soon as a permit frees up.
+                    if (!sem.tryAcquire()) {
+                        return;
+                    }
+                    swapped = swapBatchUnderLock();
+                    if (swapped == null) {
+                        sem.release();
+                        return;
+                    }
+                } else {
+                    swapped = swapBatchUnderLock();
+                    if (swapped == null) {
+                        return;
+                    }
 
+                    try {
+                        sem.acquire();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        // The swapped-out batch is the only reference to these documents.
+                        // Restore it and fail loud — returning silently here would let the
+                        // bundle commit (and Pub/Sub ack) without the data ever being sent.
+                        try {
+                            restoreBatch(swapped.docs, swapped.sizeBytes);
+                        } finally {
+                            unregisteredFlushes.decrementAndGet();
+                        }
+                        throw new RuntimeException(
+                            "Interrupted while waiting for Elasticsearch backpressure permit; "
+                            + swapped.docs.size() + " documents restored to the pending batch", e);
+                    }
+                }
+
+                final List<byte[]> currentBatch = swapped.docs;
+                final long batchBytes = swapped.sizeBytes;
+                final Queue<CompletableFuture<Void>> bundleOps = swapped.bundleOps;
+                final AtomicReference<Throwable> bundleFailure = swapped.bundleFailure;
+
+                try {
                     // Process batch on dedicated IO executor — never starves ForkJoinPool.commonPool()
                     boolean submitted = false;
                     try {
@@ -1243,27 +1482,28 @@ public class ElasticsearchIO {
                                 totalErrors.increment();
                                 throw new RuntimeException("Batch processing failed", e);
                             } finally {
-                                concurrencySemaphore.release();
+                                sem.release();
                             }
-                        }, ioExecutor);
+                        }, executor);
                         submitted = true;
-                        pendingOperations.add(future);
+                        bundleOps.add(future);
                         // Self-remove on completion so the queue stays bounded by the
                         // in-flight set (and stops pinning each batch's byte[]s) instead
-                        // of growing for the whole bundle. Failures are captured first so
-                        // FinishBundle still sees them after the future leaves the queue.
+                        // of growing for the whole bundle. Failures are captured in the
+                        // bundle-scoped cell first so FinishBundle still sees them after
+                        // the future leaves the queue, without poisoning later bundles.
                         future.whenComplete((v, t) -> {
                             if (t != null) {
-                                firstAsyncFailure.compareAndSet(null, t);
+                                bundleFailure.compareAndSet(null, t);
                             }
-                            pendingOperations.remove(future);
+                            bundleOps.remove(future);
                         });
                     } finally {
                         // runAsync throws synchronously (RejectedExecutionException) if the
                         // executor was shut down — the task body never runs, so the permit
                         // acquired above would leak and the batch would vanish untracked.
                         if (!submitted) {
-                            concurrencySemaphore.release();
+                            sem.release();
                             restoreBatch(currentBatch, batchBytes);
                         }
                     }
@@ -1293,11 +1533,13 @@ public class ElasticsearchIO {
                     return;
                 }
                 RetryConf retryConf = spec.getRetryConf();
-                int maxRetries = retryConf != null ? retryConf.getMaxAttempts() : 1;
-                // ONE wall-clock retry budget shared by both retry layers (item-level
-                // partial-failure retries and HTTP-level request retries). Applying
-                // maxAttempts independently at each layer multiplied to maxAttempts²
-                // requests per batch, hammering a cluster that was already struggling.
+                // maxAttempts is total attempts (1 initial + N-1 retries). Align retriesLeft
+                // with FluentBackoff's maxRetries (also maxAttempts - 1) so the remaining-retry
+                // count in logs and the backoff state machine stay in lockstep.
+                int maxRetries = retryConf != null ? retryConf.getMaxAttempts() - 1 : 0;
+                // ONE wall-clock retry budget (RetryConf.maxDuration) shared by both retry
+                // layers (item-level partial-failure retries and HTTP-level request retries)
+                // so total backoff time across both layers cannot exceed maxDuration.
                 // Without a RetryConf there are no backoff sleeps, so the budget value
                 // is moot — 30s is a safe bound.
                 long retryBudgetMillis = retryConf != null
@@ -1428,28 +1670,6 @@ public class ElasticsearchIO {
                 }
             }
 
-            /**
-             * Builds one complete NDJSON bulk entry: action line + source + newline.
-             * With an idFn configured, the action line carries a deterministic
-             * {@code _id} so HTTP-level resends and Beam bundle retries overwrite the
-             * same document instead of duplicating it under a fresh auto-id.
-             */
-            private byte[] buildBulkUnit(String doc, byte[] docUtf8) throws IOException {
-                SerializableFunction<String, String> idFn = spec.getIdFn();
-                String id = idFn != null ? idFn.apply(doc) : null;
-                byte[] actionBytes = id == null
-                    ? INDEX_ACTION_BYTES
-                    // writeValueAsString JSON-escapes and quotes the id
-                    : ("{\"index\":{\"_id\":" + mapper.writeValueAsString(id) + "}}\n")
-                        .getBytes(StandardCharsets.UTF_8);
-
-                byte[] unit = new byte[actionBytes.length + docUtf8.length + 1];
-                System.arraycopy(actionBytes, 0, unit, 0, actionBytes.length);
-                System.arraycopy(docUtf8, 0, unit, actionBytes.length, docUtf8.length);
-                unit[unit.length - 1] = '\n';
-                return unit;
-            }
-
             // Batch entries are complete pre-encoded bulk units — just concatenate
             private void buildBulkRequest(List<byte[]> docs, java.io.OutputStream out) throws IOException {
                 for (byte[] unit : docs) {
@@ -1464,7 +1684,8 @@ public class ElasticsearchIO {
              *
              * @throws IOException on unrecoverable HTTP-level failures (exhausted retries)
              */
-            private BulkResult executeWithRetry(byte[] requestBody, int requestBodyLen, int docCount,
+            @VisibleForTesting
+            BulkResult executeWithRetry(byte[] requestBody, int requestBodyLen, int docCount,
                     long batchSizeBytes, boolean compressed, long deadlineMillis)
                     throws IOException, InterruptedException {
                 String endpoint = "/" + spec.getConnectionConf().getIndex() + "/_bulk";
@@ -1473,8 +1694,8 @@ public class ElasticsearchIO {
                 int attempt = 0;
                 int maxAttempts = spec.getRetryConf() != null ? spec.getRetryConf().getMaxAttempts() : 1;
 
+                HttpEntity rawResponseEntity = null;
                 while (true) {
-                    HttpEntity rawResponseEntity = null;
                     try {
                         // Validate client state before making request
                         if (!restClient.isRunning()) {
@@ -1500,27 +1721,34 @@ public class ElasticsearchIO {
                         Response response = restClient.performRequest(request);
                         asyncBulkLatenciesMs.add(System.currentTimeMillis() - requestStartMillis);
                         rawResponseEntity = response.getEntity();
-
-                        // The low-level RestClient already hands back a fully
-                        // heap-buffered entity (the connection is free), so the former
-                        // EntityUtils.toByteArray + re-wrap was a redundant full copy
-                        // of the response body.
-                        // Parse per-item results — does NOT throw on per-item failures.
-                        // docCount seeds the no-errors fast path so it does not depend
-                        // on the filtered response's item list.
-                        BulkResult result = parseBulkResponse(rawResponseEntity,
-                            TARGET_ES_MAJOR_VERSION, false, docCount);
-
-                        logger.debug("Bulk response: {} succeeded, {} retryable failures, {} non-retryable failures",
-                            result.successCount, result.retryableFailures.size(),
-                            result.nonRetryableFailures.size());
-
-                        return result;
+                        break;
 
                     } catch (IOException | IllegalStateException e) {
-                        // HTTP-level failure — connection refused, timeout, stale client
+                        // HTTP-level failure — connection refused, timeout, stale client, or HTTP >= 300
                         attempt++;
                         totalErrors.increment();
+
+                        // RestClient throws ResponseException (extends IOException) on HTTP >= 300.
+                        // Fail fast on non-retryable client errors (400, 401, 403, 404, 413) instead
+                        // of burning maxAttempts retries and holding a backpressure permit on a
+                        // deterministic failure.
+                        if (e instanceof ResponseException) {
+                            Response errResp = ((ResponseException) e).getResponse();
+                            int httpStatus = (errResp != null && errResp.getStatusLine() != null)
+                                ? errResp.getStatusLine().getStatusCode() : 0;
+                            if (httpStatus > 0 && !isRetryableHttpStatus(httpStatus)) {
+                                logger.error("Non-retryable HTTP {} error from Elasticsearch on _bulk request",
+                                    httpStatus, e);
+                                throw new IOException(
+                                    "Non-retryable HTTP " + httpStatus + " error from Elasticsearch", e);
+                            }
+                            if (httpStatus == 429) {
+                                // Unified per-attempt backpressure signal: count every
+                                // HTTP-level 429 rejection event across all attempts,
+                                // matching the per-item 429 counting in processBatchWithRetry.
+                                asyncRejected429.add(docCount);
+                            }
+                        }
 
                         // Handle client state issues specifically
                         if (e instanceof IllegalStateException
@@ -1528,13 +1756,13 @@ public class ElasticsearchIO {
                             logger.warn("IllegalStateException detected - client may be closed. Recreating client...");
                             try {
                                 String currentPoolKey = spec.getConnectionConf().getPoolKey();
-                                // Evict only the exact instance we observed failing — a blind
-                                // remove() could evict a healthy client another IO thread just
-                                // recreated. Close the evicted client: dropping the reference
-                                // leaked its HTTP IO-reactor threads and open sockets on every
-                                // recovery cycle.
+                                // Evict and close only if the client is actually stopped — an
+                                // IllegalStateException from something else (e.g. an invalid
+                                // request or connection pool state) must not close a running
+                                // RestClient that other worker threads are still using.
                                 RestClient stale = restClient;
-                                if (stale != null && clientPool.remove(currentPoolKey, stale)) {
+                                if (stale != null && !stale.isRunning()
+                                        && clientPool.remove(currentPoolKey, stale)) {
                                     try {
                                         stale.close();
                                     } catch (IOException closeEx) {
@@ -1568,11 +1796,28 @@ public class ElasticsearchIO {
                             throw new IOException("Retry budget exhausted after " + attempt + " attempts", e);
                         }
                         Sleeper.DEFAULT.sleep(backoffMillis);
+                    }
+                }
 
-                    } finally {
-                        if (rawResponseEntity != null) {
-                            EntityUtils.consumeQuietly(rawResponseEntity);
-                        }
+                // Parse per-item results OUTSIDE the HTTP retry loop: once performRequest()
+                // returns a 2xx Response, Elasticsearch has already applied the bulk request.
+                // Treating a malformed/truncated response body as a retryable transport error
+                // would re-POST the entire batch and duplicate every document when idFn is not set.
+                try {
+                    BulkResult result = parseBulkResponse(rawResponseEntity,
+                        TARGET_ES_MAJOR_VERSION, false, docCount);
+
+                    logger.debug("Bulk response: {} succeeded, {} retryable failures, {} non-retryable failures",
+                        result.successCount, result.retryableFailures.size(),
+                        result.nonRetryableFailures.size());
+
+                    return result;
+                } catch (IOException e) {
+                    totalErrors.increment();
+                    throw e;
+                } finally {
+                    if (rawResponseEntity != null) {
+                        EntityUtils.consumeQuietly(rawResponseEntity);
                     }
                 }
             }
@@ -1601,6 +1846,11 @@ public class ElasticsearchIO {
     private static final Set<Integer> RETRYABLE_STATUS_CODES =
         new HashSet<>(Arrays.asList(429, 500, 502, 503, 504));
 
+    /** Returns true if an HTTP-level response status is transient and safe to retry. */
+    static boolean isRetryableHttpStatus(int statusCode) {
+        return statusCode == 408 || RETRYABLE_STATUS_CODES.contains(statusCode);
+    }
+
     /**
      * Parses a bulk API response into a structured {@link BulkResult} with per-item
      * success/failure classification. This method does NOT throw on per-item
@@ -1622,12 +1872,34 @@ public class ElasticsearchIO {
     static BulkResult parseBulkResponse(HttpEntity responseEntity, int esVersion,
             boolean partialUpdate, int expectedItemCount) throws IOException {
         JsonNode searchResult = parseResponse(responseEntity);
+        JsonNode errorsNode = searchResult != null ? searchResult.get("errors") : null;
+        if (errorsNode == null || !errorsNode.isBoolean()) {
+            throw new IOException(
+                "Malformed Elasticsearch bulk response: missing boolean 'errors' field: " + searchResult);
+        }
         JsonNode items = searchResult.path("items");
 
         // Fast path: no errors at all
-        if (!searchResult.path("errors").asBoolean()) {
+        if (!errorsNode.booleanValue()) {
+            if (expectedItemCount >= 0 && items.isArray() && items.size() != expectedItemCount) {
+                throw new IOException(
+                    "Malformed Elasticsearch bulk response: expected " + expectedItemCount
+                    + " items but received " + items.size());
+            }
             return new BulkResult(expectedItemCount >= 0 ? expectedItemCount : items.size(),
                 new ArrayList<>(0), new ArrayList<>(0));
+        }
+
+        if (!items.isArray()) {
+            throw new IOException(
+                "Malformed Elasticsearch bulk response: 'errors' is true but 'items' is missing or not an array: "
+                + searchResult);
+        }
+
+        if (expectedItemCount >= 0 && items.size() != expectedItemCount) {
+            throw new IOException(
+                "Malformed Elasticsearch bulk response: expected " + expectedItemCount
+                + " items but received " + items.size());
         }
 
         // Slow path: classify each failed item
@@ -1684,6 +1956,136 @@ public class ElasticsearchIO {
         }
 
         return new BulkResult(successCount, retryable, nonRetryable);
+    }
+
+    /**
+     * Returns the length of {@code utf8} after stripping any trailing {@code '\r'}
+     * or {@code '\n'} bytes so appending the mandatory NDJSON delimiter {@code '\n'}
+     * never produces an empty blank line between bulk entries.
+     */
+    static int trimTrailingNewlines(byte[] utf8) {
+        int end = utf8.length;
+        while (end > 0 && (utf8[end - 1] == '\n' || utf8[end - 1] == '\r')) {
+            end--;
+        }
+        return end;
+    }
+
+    /**
+     * Returns {@code true} if {@code utf8[0..len)} contains only ASCII whitespace.
+     * For normal JSON documents starting with {@code '{'}, this returns {@code false}
+     * on the very first byte with zero allocations.
+     */
+    static boolean isBlankUtf8(byte[] utf8, int len) {
+        for (int i = 0; i < len; i++) {
+            byte b = utf8[i];
+            if (b != ' ' && b != '\t' && b != '\n' && b != '\r') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Dedicated unchecked exception for deterministic per-document validation failures
+     * (empty {@code _id}, {@link RuntimeException} thrown by {@code idFn.apply(doc)},
+     * or unescaped CR/LF inside a JSON string literal).
+     *
+     * <p>Deliberately extends {@link RuntimeException} directly rather than
+     * {@link IllegalArgumentException} so {@link Append.AppendFn#processElement}
+     * only skips documents for explicitly wrapped validation failures while allowing
+     * {@link Error}s and unexpected bugs in our own code to fail the bundle.
+     */
+    @VisibleForTesting
+    static final class InvalidDocumentException extends RuntimeException {
+        InvalidDocumentException(String message) {
+            super(message);
+        }
+
+        InvalidDocumentException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
+     * Builds one complete NDJSON bulk entry: {@code action_line + sanitized_source + '\n'}
+     * in a single pass over the document bytes.
+     *
+     * <p>With an {@code idFn} configured, the action line carries a deterministic
+     * {@code _id} encoded directly to UTF-8 bytes via {@link ObjectMapper#writeValueAsBytes}
+     * (avoiding intermediate String allocations) so HTTP-level resends and Beam bundle
+     * retries overwrite the same document instead of duplicating it under a fresh auto-id.
+     * A {@link RuntimeException} thrown by {@code idFn.apply(doc)} or an empty {@code _id}
+     * ({@code ""}) is rejected with {@link InvalidDocumentException}.
+     *
+     * <p>Per RFC 8259, raw CR/LF bytes are legal JSON whitespace only between tokens
+     * (outside string literals): inter-token {@code '\r'} / {@code '\n'} are replaced
+     * in place with ASCII space ({@code ' '}), while any unescaped {@code '\r'} / {@code '\n'}
+     * inside a JSON string literal throws {@link InvalidDocumentException} instead of
+     * silently mutating the stored string value.
+     */
+    @VisibleForTesting
+    static byte[] buildBulkUnit(
+            String doc,
+            byte[] docUtf8,
+            int docLen,
+            @Nullable SerializableFunction<String, String> idFn) throws IOException {
+        final String id;
+        if (idFn != null) {
+            try {
+                id = idFn.apply(doc);
+            } catch (RuntimeException e) {
+                throw new InvalidDocumentException("idFn threw an exception: " + e.getMessage(), e);
+            }
+        } else {
+            id = null;
+        }
+        if (id != null && id.isEmpty()) {
+            throw new InvalidDocumentException("idFn returned an empty _id");
+        }
+
+        final byte[] unit;
+        final int docStartOffset;
+
+        if (id == null) {
+            docStartOffset = INDEX_ACTION_BYTES.length;
+            unit = new byte[docStartOffset + docLen + 1];
+            System.arraycopy(INDEX_ACTION_BYTES, 0, unit, 0, docStartOffset);
+        } else {
+            byte[] idJsonBytes = mapper.writeValueAsBytes(id);
+            int prefixLen = INDEX_ID_ACTION_PREFIX_BYTES.length;
+            int suffixLen = INDEX_ID_ACTION_SUFFIX_BYTES.length;
+            docStartOffset = prefixLen + idJsonBytes.length + suffixLen;
+            unit = new byte[docStartOffset + docLen + 1];
+            System.arraycopy(INDEX_ID_ACTION_PREFIX_BYTES, 0, unit, 0, prefixLen);
+            System.arraycopy(idJsonBytes, 0, unit, prefixLen, idJsonBytes.length);
+            System.arraycopy(INDEX_ID_ACTION_SUFFIX_BYTES, 0, unit, prefixLen + idJsonBytes.length, suffixLen);
+        }
+
+        System.arraycopy(docUtf8, 0, unit, docStartOffset, docLen);
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = docStartOffset, limit = docStartOffset + docLen; i < limit; i++) {
+            byte b = unit[i];
+            if (!inString) {
+                if (b == '"') {
+                    inString = true;
+                } else if (b == '\n' || b == '\r') {
+                    unit[i] = ' ';
+                }
+            } else if (escaped) {
+                escaped = false;
+            } else if (b == '\\') {
+                escaped = true;
+            } else if (b == '"') {
+                inString = false;
+            } else if (b == '\n' || b == '\r') {
+                throw new InvalidDocumentException(
+                    "Document contains unescaped CR/LF inside a JSON string literal");
+            }
+        }
+        unit[unit.length - 1] = '\n';
+        return unit;
     }
 
     /**
